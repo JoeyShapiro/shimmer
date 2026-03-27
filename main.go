@@ -178,7 +178,7 @@ func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName
 
 		// Create individual file for this line
 		timestamp := time.Now().Format("20060102_150405.000000")
-		filename := filepath.Join(captureDir, fmt.Sprintf("%s_%04d_%s.txt", streamName, lineCounter, timestamp))
+		filename := filepath.Join(captureDir, fmt.Sprintf("%s_%s_%04d.txt", timestamp, streamName, lineCounter))
 
 		content := fmt.Sprintf("# Captured at: %s\n# Stream: %s\n# Line: %d\n%s\n",
 			time.Now().Format(time.RFC3339Nano),
@@ -390,18 +390,19 @@ func main() {
 	// Pass all arguments except the first one (which is this program's path)
 	cmd := exec.Command(realExePath, os.Args[1:]...)
 
-	// Setup stdin capture (always one file for stdin)
-	stdinFile := filepath.Join(captureDir, "stdin.txt")
-	stdinCapture, err := os.Create(stdinFile)
-	if err != nil {
-		logMsg("Error creating stdin file: %v", err)
-		os.Exit(1)
-	}
-	defer stdinCapture.Close()
-	cmd.Stdin = io.TeeReader(os.Stdin, stdinCapture)
-
 	// Choose capture mode based on config
 	if compiledConfig.OneFilePerLine {
+		// TODO setup like stdout
+		// Setup stdin capture (always one file for stdin)
+		stdinFile := filepath.Join(captureDir, "stdin.txt")
+		stdinCapture, err := os.Create(stdinFile)
+		if err != nil {
+			logMsg("Error creating stdin file: %v", err)
+			os.Exit(1)
+		}
+		defer stdinCapture.Close()
+		cmd.Stdin = io.TeeReader(os.Stdin, stdinCapture)
+
 		// One file per line mode
 		stdoutPipe, err := cmd.StdoutPipe()
 		if err != nil {
@@ -443,6 +444,16 @@ func main() {
 		wg.Wait()
 		err = cmd.Wait()
 	} else {
+		// Setup stdin capture (always one file for stdin)
+		stdinFile := filepath.Join(captureDir, "stdin.txt")
+		stdinCapture, err := os.Create(stdinFile)
+		if err != nil {
+			logMsg("Error creating stdin file: %v", err)
+			os.Exit(1)
+		}
+		defer stdinCapture.Close()
+		cmd.Stdin = io.TeeReader(os.Stdin, stdinCapture)
+
 		// One file per stream mode with regex replacement support
 		stdoutFile := filepath.Join(captureDir, "stdout.txt")
 		stderrFile := filepath.Join(captureDir, "stderr.txt")
