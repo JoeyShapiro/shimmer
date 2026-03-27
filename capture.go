@@ -42,13 +42,7 @@ func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName
 		timestamp := time.Now().Format("20060102_150405.000000")
 		filename := filepath.Join(captureDir, fmt.Sprintf("%s_%s_%04d.txt", timestamp, streamName, lineCounter))
 
-		content := fmt.Sprintf("# Captured at: %s\n# Stream: %s\n# Line: %d\n%s\n",
-			time.Now().Format(time.RFC3339Nano),
-			streamName,
-			lineCounter,
-			processedLine)
-
-		if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(filename, []byte(processedLine), 0644); err != nil {
 			logMsg("Error writing %s line %d to file: %v", streamName, lineCounter, err)
 		}
 	}
