@@ -8,12 +8,6 @@ import (
 )
 
 func main() {
-	// Initialize logging
-	initLog()
-	if logFile != nil {
-		defer logFile.Close()
-	}
-
 	// Check if we're running as "shimmer" for meta commands
 	exePath, err := os.Executable()
 	if err != nil {

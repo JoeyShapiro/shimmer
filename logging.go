@@ -8,10 +8,8 @@ import (
 
 var logFile *os.File
 
-func initLog() {
-	exePath, _ := os.Executable()
-	exeDir := filepath.Dir(exePath)
-	logPath := filepath.Join(exeDir, "shimmer.log")
+func initLog(captureDir string) {
+	logPath := filepath.Join(captureDir, "shimmer.log")
 
 	var err error
 	logFile, err = os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)

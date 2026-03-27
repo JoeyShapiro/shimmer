@@ -56,14 +56,32 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 	// Create capture folder with timestamp
 	exeDir := filepath.Dir(exePath)
 	timestamp := time.Now().Format("20060102_150405_000")
-	captureDir := filepath.Join(exeDir, fmt.Sprintf("capture_%s_%s", nameWithoutExt, timestamp))
 
-	logMsg("Intercepting call to %s, capture dir: %s", nameWithoutExt, captureDir)
+	// Determine base directory for captures
+	baseDir := exeDir
+	if compiledConfig.CapturePath != "" && compiledConfig.CapturePath != "." {
+		// If path is relative, make it relative to executable directory
+		if !filepath.IsAbs(compiledConfig.CapturePath) {
+			baseDir = filepath.Join(exeDir, compiledConfig.CapturePath)
+		} else {
+			baseDir = compiledConfig.CapturePath
+		}
+	}
+
+	captureDir := filepath.Join(baseDir, fmt.Sprintf("capture_%s_%s", nameWithoutExt, timestamp))
 
 	if err := os.MkdirAll(captureDir, 0755); err != nil {
-		logMsg("Error creating capture directory: %v", err)
+		// Can't log yet since capture dir creation failed
 		os.Exit(1)
 	}
+
+	// Initialize logging in the capture directory
+	initLog(captureDir)
+	if logFile != nil {
+		defer logFile.Close()
+	}
+
+	logMsg("Intercepting call to %s, capture dir: %s", nameWithoutExt, captureDir)
 
 	// Write environment and arguments
 	writeEnvironmentFiles(captureDir)

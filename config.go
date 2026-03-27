@@ -24,6 +24,11 @@ type Config struct {
 
 	// RegexReplacements defines patterns to replace in stream output
 	RegexReplacements []RegexReplacement `json:"regex_replacements"`
+
+	// CapturePath specifies the base directory for capture folders
+	// If empty or ".", captures are created in the executable's directory
+	// Can be absolute or relative path
+	CapturePath string `json:"capture_path"`
 }
 
 // CompiledConfig holds the parsed configuration with compiled regexes
@@ -35,6 +40,7 @@ type CompiledConfig struct {
 	StdoutReplaceWith  []string
 	StderrReplacements []*regexp.Regexp
 	StderrReplaceWith  []string
+	CapturePath        string
 }
 
 // DefaultConfig returns the default configuration
@@ -80,6 +86,7 @@ func LoadConfig() Config {
 func CompileConfig(config Config) (*CompiledConfig, error) {
 	compiled := &CompiledConfig{
 		OneFilePerLine: config.OneFilePerLine,
+		CapturePath:    config.CapturePath,
 	}
 
 	for _, rule := range config.RegexReplacements {
