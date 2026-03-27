@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -35,18 +36,37 @@ import (
 
 var logFile *os.File
 
+// RegexReplacement defines a regex pattern replacement rule
+type RegexReplacement struct {
+	Stream  string `json:"stream"`  // "stdout", "stderr", or "all"
+	Pattern string `json:"pattern"` // regex pattern to match
+	Replace string `json:"replace"` // replacement string
+}
+
 // Config holds the application configuration
 type Config struct {
 	// OneFilePerLine determines the output capture mode:
 	// true: each line of output gets its own timestamped file
 	// false: one file per stream (stdout, stderr, stdin)
 	OneFilePerLine bool `json:"one_file_per_line"`
+
+	// RegexReplacements defines patterns to replace in stream output
+	RegexReplacements []RegexReplacement `json:"regex_replacements"`
+}
+
+// CompiledConfig holds the parsed configuration with compiled regexes
+type CompiledConfig struct {
+	OneFilePerLine     bool
+	StdoutReplacements []*regexp.Regexp
+	StdoutReplaceWith  []string
+	StderrReplacements []*regexp.Regexp
+	StderrReplaceWith  []string
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() Config {
 	return Config{
-		OneFilePerLine: false,
+		OneFilePerLine: true,
 	}
 }
 
@@ -78,8 +98,36 @@ func LoadConfig() Config {
 		return DefaultConfig()
 	}
 
-	logMsg("Loaded config: OneFilePerLine=%v", config.OneFilePerLine)
+	logMsg("Loaded config: OneFilePerLine=%v, RegexReplacements=%d", config.OneFilePerLine, len(config.RegexReplacements))
 	return config
+}
+
+// CompileConfig compiles regex patterns in the config
+func CompileConfig(config Config) (*CompiledConfig, error) {
+	compiled := &CompiledConfig{
+		OneFilePerLine: config.OneFilePerLine,
+	}
+
+	for _, rule := range config.RegexReplacements {
+		re, err := regexp.Compile(rule.Pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid regex pattern '%s': %w", rule.Pattern, err)
+		}
+
+		switch rule.Stream {
+		case "stdout", "all":
+			compiled.StdoutReplacements = append(compiled.StdoutReplacements, re)
+			compiled.StdoutReplaceWith = append(compiled.StdoutReplaceWith, rule.Replace)
+		}
+
+		switch rule.Stream {
+		case "stderr", "all":
+			compiled.StderrReplacements = append(compiled.StderrReplacements, re)
+			compiled.StderrReplaceWith = append(compiled.StderrReplaceWith, rule.Replace)
+		}
+	}
+
+	return compiled, nil
 }
 
 func initLog() {
@@ -103,18 +151,30 @@ func logMsg(format string, args ...any) {
 	}
 }
 
+// applyReplacements applies regex replacements to a line
+func applyReplacements(line string, patterns []*regexp.Regexp, replacements []string) string {
+	result := line
+	for i, re := range patterns {
+		result = re.ReplaceAllString(result, replacements[i])
+	}
+	return result
+}
+
 // captureLineByLine reads from input line by line, writes each line to both
 // output (for passthrough) and to individual timestamped files in captureDir
-func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName string) {
+func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName string, patterns []*regexp.Regexp, replacements []string) {
 	scanner := bufio.NewScanner(input)
 	lineCounter := 0
 
 	for scanner.Scan() {
-		line := scanner.Text()
+		originalLine := scanner.Text()
 		lineCounter++
 
-		// Write to output for passthrough
-		fmt.Fprintln(output, line)
+		// Apply regex replacements
+		processedLine := applyReplacements(originalLine, patterns, replacements)
+
+		// Write processed line to output for passthrough
+		fmt.Fprintln(output, processedLine)
 
 		// Create individual file for this line
 		timestamp := time.Now().Format("20060102_150405.000000")
@@ -124,7 +184,7 @@ func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName
 			time.Now().Format(time.RFC3339Nano),
 			streamName,
 			lineCounter,
-			line)
+			processedLine)
 
 		if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
 			logMsg("Error writing %s line %d to file: %v", streamName, lineCounter, err)
@@ -279,6 +339,12 @@ func main() {
 
 	// Load configuration
 	config := LoadConfig()
+	compiledConfig, err := CompileConfig(config)
+	if err != nil {
+		logMsg("Error compiling config: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Normal shim behavior below
 	// Create capture folder with timestamp
@@ -332,11 +398,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer stdinCapture.Close()
-	fmt.Fprintf(stdinCapture, "# Captured at: %s\n", time.Now().Format(time.RFC3339Nano))
 	cmd.Stdin = io.TeeReader(os.Stdin, stdinCapture)
 
 	// Choose capture mode based on config
-	if config.OneFilePerLine {
+	if compiledConfig.OneFilePerLine {
 		// One file per line mode
 		stdoutPipe, err := cmd.StdoutPipe()
 		if err != nil {
@@ -356,13 +421,15 @@ func main() {
 		// Handle stdout line by line
 		go func() {
 			defer wg.Done()
-			captureLineByLine(stdoutPipe, os.Stdout, captureDir, "stdout")
+			captureLineByLine(stdoutPipe, os.Stdout, captureDir, "stdout",
+				compiledConfig.StdoutReplacements, compiledConfig.StdoutReplaceWith)
 		}()
 
 		// Handle stderr line by line
 		go func() {
 			defer wg.Done()
-			captureLineByLine(stderrPipe, os.Stderr, captureDir, "stderr")
+			captureLineByLine(stderrPipe, os.Stderr, captureDir, "stderr",
+				compiledConfig.StderrReplacements, compiledConfig.StderrReplaceWith)
 		}()
 
 		cmd.Env = os.Environ()
@@ -376,7 +443,7 @@ func main() {
 		wg.Wait()
 		err = cmd.Wait()
 	} else {
-		// One file per stream mode (original behavior)
+		// One file per stream mode with regex replacement support
 		stdoutFile := filepath.Join(captureDir, "stdout.txt")
 		stderrFile := filepath.Join(captureDir, "stderr.txt")
 
@@ -386,7 +453,6 @@ func main() {
 			os.Exit(1)
 		}
 		defer stdoutCapture.Close()
-		fmt.Fprintf(stdoutCapture, "# Captured at: %s\n", time.Now().Format(time.RFC3339Nano))
 
 		stderrCapture, err := os.Create(stderrFile)
 		if err != nil {
@@ -394,14 +460,67 @@ func main() {
 			os.Exit(1)
 		}
 		defer stderrCapture.Close()
-		fmt.Fprintf(stderrCapture, "# Captured at: %s\n", time.Now().Format(time.RFC3339Nano))
 
-		cmd.Stdout = io.MultiWriter(os.Stdout, stdoutCapture)
-		cmd.Stderr = io.MultiWriter(os.Stderr, stderrCapture)
-		cmd.Env = os.Environ()
+		// If we have regex replacements, use pipes to apply them
+		if len(compiledConfig.StdoutReplacements) > 0 || len(compiledConfig.StderrReplacements) > 0 {
+			stdoutPipe, err := cmd.StdoutPipe()
+			if err != nil {
+				logMsg("Error creating stdout pipe: %v", err)
+				os.Exit(1)
+			}
 
-		logMsg("Executing real program: %s with %d args (one-file-per-stream mode)", realExePath, len(os.Args)-1)
-		err = cmd.Run()
+			stderrPipe, err := cmd.StderrPipe()
+			if err != nil {
+				logMsg("Error creating stderr pipe: %v", err)
+				os.Exit(1)
+			}
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			// Handle stdout with replacements
+			go func() {
+				defer wg.Done()
+				scanner := bufio.NewScanner(stdoutPipe)
+				for scanner.Scan() {
+					line := scanner.Text()
+					processedLine := applyReplacements(line, compiledConfig.StdoutReplacements, compiledConfig.StdoutReplaceWith)
+					fmt.Fprintln(os.Stdout, processedLine)
+					fmt.Fprintln(stdoutCapture, processedLine)
+				}
+			}()
+
+			// Handle stderr with replacements
+			go func() {
+				defer wg.Done()
+				scanner := bufio.NewScanner(stderrPipe)
+				for scanner.Scan() {
+					line := scanner.Text()
+					processedLine := applyReplacements(line, compiledConfig.StderrReplacements, compiledConfig.StderrReplaceWith)
+					fmt.Fprintln(os.Stderr, processedLine)
+					fmt.Fprintln(stderrCapture, processedLine)
+				}
+			}()
+
+			cmd.Env = os.Environ()
+			logMsg("Executing real program: %s with %d args (one-file-per-stream mode with regex)", realExePath, len(os.Args)-1)
+
+			if err := cmd.Start(); err != nil {
+				logMsg("Error starting real executable: %v", err)
+				os.Exit(1)
+			}
+
+			wg.Wait()
+			err = cmd.Wait()
+		} else {
+			// No regex replacements, use original MultiWriter approach
+			cmd.Stdout = io.MultiWriter(os.Stdout, stdoutCapture)
+			cmd.Stderr = io.MultiWriter(os.Stderr, stderrCapture)
+			cmd.Env = os.Environ()
+
+			logMsg("Executing real program: %s with %d args (one-file-per-stream mode)", realExePath, len(os.Args)-1)
+			err = cmd.Run()
+		}
 	}
 
 	if err != nil {
