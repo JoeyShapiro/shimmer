@@ -1,74 +1,75 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
 
 func main() {
-	// Check if we're running as "shimmer" for meta commands
+	if err := run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	exePath, err := os.Executable()
 	if err != nil {
-		logMsg("Error getting executable path: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 	exeName := filepath.Base(exePath)
 	nameWithoutExt := strings.TrimSuffix(exeName, filepath.Ext(exeName))
 
-	// Handle meta commands when running as "shimmer"
 	if nameWithoutExt == "shimmer" {
-		handleMetaCommands()
-		return
+		return handleMetaCommands()
 	}
 
-	// Load and compile configuration
 	config := LoadConfig()
 	compiledConfig, err := CompileConfig(config)
 	if err != nil {
-		logMsg("Error compiling config: %v", err)
-		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Execute the shimmed program
-	executeShimmedProgram(exePath, exeName, nameWithoutExt, compiledConfig)
+	return executeShimmedProgram(exePath, exeName, nameWithoutExt, compiledConfig)
 }
 
-func handleMetaCommands() {
+func handleMetaCommands() error {
 	if len(os.Args) < 2 {
 		printUsage()
-		os.Exit(1)
+		return errors.New("no command provided")
 	}
 
 	command := os.Args[1]
 	switch command {
 	case "setup":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: shimmer setup <program>")
-			os.Exit(1)
+			return errors.New("usage: shimmer setup <program>")
 		}
 		if err := setupShim(os.Args[2]); err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 		fmt.Printf("Successfully shimmed %s\n", os.Args[2])
 
 	case "unshim", "remove":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: shimmer unshim <program>")
-			os.Exit(1)
+			return errors.New("usage: shimmer unshim <program>")
 		}
 		if err := unshim(os.Args[2]); err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 
 	default:
-		fmt.Printf("Unknown command: %s\n", command)
-		os.Exit(1)
+		return fmt.Errorf("unknown command: %s", command)
 	}
+	return nil
 }
 
 func printUsage() {

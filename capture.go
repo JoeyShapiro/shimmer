@@ -52,15 +52,12 @@ func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName
 	}
 }
 
-func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConfig *CompiledConfig) {
-	// Create capture folder with timestamp
+func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConfig *CompiledConfig) error {
 	exeDir := filepath.Dir(exePath)
 	timestamp := time.Now().Format("20060102_150405_000")
 
-	// Determine base directory for captures
 	baseDir := exeDir
 	if compiledConfig.CapturePath != "" && compiledConfig.CapturePath != "." {
-		// If path is relative, make it relative to executable directory
 		if !filepath.IsAbs(compiledConfig.CapturePath) {
 			baseDir = filepath.Join(exeDir, compiledConfig.CapturePath)
 		} else {
@@ -71,11 +68,9 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 	captureDir := filepath.Join(baseDir, fmt.Sprintf("capture_%s_%s", nameWithoutExt, timestamp))
 
 	if err := os.MkdirAll(captureDir, 0755); err != nil {
-		// Can't log yet since capture dir creation failed
-		os.Exit(1)
+		return fmt.Errorf("failed to create capture directory: %w", err)
 	}
 
-	// Initialize logging in the capture directory
 	initLog(captureDir)
 	if logFile != nil {
 		defer logFile.Close()
@@ -83,24 +78,20 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 
 	logMsg("Intercepting call to %s, capture dir: %s", nameWithoutExt, captureDir)
 
-	// Write environment and arguments
-	writeEnvironmentFiles(captureDir)
+	if err := writeEnvironmentFiles(captureDir); err != nil {
+		return err
+	}
 
-	// Determine the real executable path
 	ext := filepath.Ext(exeName)
 	realExeName := strings.TrimSuffix(exeName, ext) + "-real" + ext
 	realExePath := filepath.Join(exeDir, realExeName)
 
-	// Check if the real executable exists
 	if _, err := os.Stat(realExePath); os.IsNotExist(err) {
-		logMsg("Real executable not found: %s", realExePath)
-		os.Exit(1)
+		return fmt.Errorf("real executable not found: %s", realExePath)
 	}
 
-	// Prepare the command
 	cmd := exec.Command(realExePath, os.Args[1:]...)
 
-	// Execute based on capture mode
 	var err error
 	if compiledConfig.OneFilePerLine {
 		err = runWithLineByLineCapture(cmd, captureDir, compiledConfig, realExePath)
@@ -108,62 +99,49 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 		err = runWithStreamCapture(cmd, captureDir, compiledConfig, realExePath)
 	}
 
-	// Handle exit codes
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			logMsg("Program exited with code %d", exitErr.ExitCode())
-			os.Exit(exitErr.ExitCode())
 		}
-		logMsg("Error executing real executable: %v", err)
-		os.Exit(1)
+		return err
 	}
 
 	logMsg("Program completed successfully")
+	return nil
 }
 
-func writeEnvironmentFiles(captureDir string) {
-	// Write environment variables to file
+func writeEnvironmentFiles(captureDir string) error {
 	envFile := filepath.Join(captureDir, "environment.txt")
-	envData := strings.Join(os.Environ(), "\n")
-	if err := os.WriteFile(envFile, []byte(envData), 0644); err != nil {
-		logMsg("Error writing environment: %v", err)
-		os.Exit(1)
+	if err := os.WriteFile(envFile, []byte(strings.Join(os.Environ(), "\n")), 0644); err != nil {
+		return fmt.Errorf("failed to write environment: %w", err)
 	}
 
-	// Write arguments to file
 	argsFile := filepath.Join(captureDir, "arguments.txt")
-	argsData := strings.Join(os.Args, "\n")
-	if err := os.WriteFile(argsFile, []byte(argsData), 0644); err != nil {
-		logMsg("Error writing arguments: %v", err)
-		os.Exit(1)
+	if err := os.WriteFile(argsFile, []byte(strings.Join(os.Args, "\n")), 0644); err != nil {
+		return fmt.Errorf("failed to write arguments: %w", err)
 	}
+	return nil
 }
 
 func runWithLineByLineCapture(cmd *exec.Cmd, captureDir string, compiledConfig *CompiledConfig, realExePath string) error {
-	// Setup stdin pipe
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		logMsg("Error creating stdin pipe: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stdin pipe: %w", err)
 	}
 
-	// Setup pipes for stdout and stderr
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		logMsg("Error creating stdout pipe: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		logMsg("Error creating stderr pipe: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(3)
 
-	// Handle stdin line by line
 	go func() {
 		defer wg.Done()
 		defer stdinPipe.Close()
@@ -171,14 +149,12 @@ func runWithLineByLineCapture(cmd *exec.Cmd, captureDir string, compiledConfig *
 			compiledConfig.StdinReplacements, compiledConfig.StdinReplaceWith)
 	}()
 
-	// Handle stdout line by line
 	go func() {
 		defer wg.Done()
 		captureLineByLine(stdoutPipe, os.Stdout, captureDir, "stdout",
 			compiledConfig.StdoutReplacements, compiledConfig.StdoutReplaceWith)
 	}()
 
-	// Handle stderr line by line
 	go func() {
 		defer wg.Done()
 		captureLineByLine(stderrPipe, os.Stderr, captureDir, "stderr",
@@ -189,8 +165,7 @@ func runWithLineByLineCapture(cmd *exec.Cmd, captureDir string, compiledConfig *
 	logMsg("Executing real program: %s with %d args (one-file-per-line mode)", realExePath, len(os.Args)-1)
 
 	if err := cmd.Start(); err != nil {
-		logMsg("Error starting real executable: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to start real executable: %w", err)
 	}
 
 	wg.Wait()
@@ -198,40 +173,30 @@ func runWithLineByLineCapture(cmd *exec.Cmd, captureDir string, compiledConfig *
 }
 
 func runWithStreamCapture(cmd *exec.Cmd, captureDir string, compiledConfig *CompiledConfig, realExePath string) error {
-	// Setup stdin capture
 	stdinFile := filepath.Join(captureDir, "stdin.txt")
 	stdinCapture, err := os.Create(stdinFile)
 	if err != nil {
-		logMsg("Error creating stdin file: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stdin file: %w", err)
 	}
 	defer stdinCapture.Close()
 	cmd.Stdin = io.TeeReader(os.Stdin, stdinCapture)
 
-	// Create output files
-	stdoutFile := filepath.Join(captureDir, "stdout.txt")
-	stderrFile := filepath.Join(captureDir, "stderr.txt")
-
-	stdoutCapture, err := os.Create(stdoutFile)
+	stdoutCapture, err := os.Create(filepath.Join(captureDir, "stdout.txt"))
 	if err != nil {
-		logMsg("Error creating stdout file: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stdout file: %w", err)
 	}
 	defer stdoutCapture.Close()
 
-	stderrCapture, err := os.Create(stderrFile)
+	stderrCapture, err := os.Create(filepath.Join(captureDir, "stderr.txt"))
 	if err != nil {
-		logMsg("Error creating stderr file: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stderr file: %w", err)
 	}
 	defer stderrCapture.Close()
 
-	// If we have regex replacements, use pipes to apply them
 	if len(compiledConfig.StdoutReplacements) > 0 || len(compiledConfig.StderrReplacements) > 0 {
 		return runWithRegexReplacements(cmd, stdoutCapture, stderrCapture, compiledConfig, realExePath)
 	}
 
-	// No regex replacements, use original MultiWriter approach
 	cmd.Stdout = io.MultiWriter(os.Stdout, stdoutCapture)
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderrCapture)
 	cmd.Env = os.Environ()
@@ -243,20 +208,17 @@ func runWithStreamCapture(cmd *exec.Cmd, captureDir string, compiledConfig *Comp
 func runWithRegexReplacements(cmd *exec.Cmd, stdoutCapture, stderrCapture *os.File, compiledConfig *CompiledConfig, realExePath string) error {
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		logMsg("Error creating stdout pipe: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		logMsg("Error creating stderr pipe: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Handle stdout with replacements
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdoutPipe)
@@ -268,7 +230,6 @@ func runWithRegexReplacements(cmd *exec.Cmd, stdoutCapture, stderrCapture *os.Fi
 		}
 	}()
 
-	// Handle stderr with replacements
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderrPipe)
@@ -284,8 +245,7 @@ func runWithRegexReplacements(cmd *exec.Cmd, stdoutCapture, stderrCapture *os.Fi
 	logMsg("Executing real program: %s with %d args (one-file-per-stream mode with regex)", realExePath, len(os.Args)-1)
 
 	if err := cmd.Start(); err != nil {
-		logMsg("Error starting real executable: %v", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to start real executable: %w", err)
 	}
 
 	wg.Wait()
