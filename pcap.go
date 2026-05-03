@@ -8,7 +8,7 @@ import (
 
 const (
 	MagicNumber   = 0xa1b2c3d4
-	LinktypeUser0 = 220
+	LinktypeUser0 = 147
 )
 
 type PcapWriter struct {
