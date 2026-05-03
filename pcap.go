@@ -33,12 +33,6 @@ type PacketHeader struct {
 	OrigLen uint32
 }
 
-type StreamPacket struct {
-	Pid    int
-	Stream StreamId
-	Data   []byte
-}
-
 type StreamId byte
 
 const (
@@ -70,18 +64,23 @@ func (pw *PcapWriter) writeGlobalHeader() error {
 
 func (pw *PcapWriter) WritePacket(pid int, id StreamId, data []byte) error {
 	t := time.Now()
-	sec := uint32(t.Unix())
-	usec := uint32(t.Nanosecond() / 1000)
-	length := uint32(len(data))
+	length := uint32(5 + len(data)) // int32 pid (4) + StreamId (1) + data
 
-	hdr := PacketHeader{sec, usec, length, length}
-	payload := StreamPacket{Pid: pid, Stream: id, Data: data}
-
+	hdr := PacketHeader{
+		TsSec:   uint32(t.Unix()),
+		TsUsec:  uint32(t.Nanosecond() / 1000),
+		InclLen: length,
+		OrigLen: length,
+	}
 	if err := binary.Write(pw.w, pw.bo, hdr); err != nil {
 		return err
 	}
-	if err := binary.Write(pw.w, pw.bo, payload); err != nil {
+	if err := binary.Write(pw.w, pw.bo, int32(pid)); err != nil {
 		return err
 	}
-	return nil
+	if err := binary.Write(pw.w, pw.bo, id); err != nil {
+		return err
+	}
+	_, err := pw.w.Write(data)
+	return err
 }

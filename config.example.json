@@ -1,5 +1,5 @@
 {
-  "one_file_per_line": true,
+  "pcap_file": true,
   "regex_replacements": [
     {
       "stream": "stdout",

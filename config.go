@@ -17,10 +17,10 @@ type RegexReplacement struct {
 
 // Config holds the application configuration
 type Config struct {
-	// OneFilePerLine determines the output capture mode:
-	// true: each line of output gets its own timestamped file
-	// false: one file per stream (stdout, stderr, stdin)
-	OneFilePerLine bool `json:"one_file_per_line"`
+	// PcapFile determines the output capture mode:
+	// true: all streams captured to a single .pcap file (default)
+	// false: each line of output gets its own timestamped file
+	PcapFile bool `json:"pcap_file"`
 
 	// RegexReplacements defines patterns to replace in stream output
 	RegexReplacements []RegexReplacement `json:"regex_replacements"`
@@ -33,7 +33,7 @@ type Config struct {
 
 // CompiledConfig holds the parsed configuration with compiled regexes
 type CompiledConfig struct {
-	OneFilePerLine     bool
+	PcapFile           bool
 	StdinReplacements  []*regexp.Regexp
 	StdinReplaceWith   []string
 	StdoutReplacements []*regexp.Regexp
@@ -46,7 +46,7 @@ type CompiledConfig struct {
 // DefaultConfig returns the default configuration
 func DefaultConfig() Config {
 	return Config{
-		OneFilePerLine: true,
+		PcapFile: true,
 	}
 }
 
@@ -78,15 +78,15 @@ func LoadConfig() Config {
 		return DefaultConfig()
 	}
 
-	logMsg("Loaded config: OneFilePerLine=%v, RegexReplacements=%d", config.OneFilePerLine, len(config.RegexReplacements))
+	logMsg("Loaded config: PcapFile=%v, RegexReplacements=%d", config.PcapFile, len(config.RegexReplacements))
 	return config
 }
 
 // CompileConfig compiles regex patterns in the config
 func CompileConfig(config Config) (*CompiledConfig, error) {
 	compiled := &CompiledConfig{
-		OneFilePerLine: config.OneFilePerLine,
-		CapturePath:    config.CapturePath,
+		PcapFile:    config.PcapFile,
+		CapturePath: config.CapturePath,
 	}
 
 	for _, rule := range config.RegexReplacements {

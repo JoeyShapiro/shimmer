@@ -13,43 +13,15 @@ import (
 	"time"
 )
 
-// applyReplacements applies regex replacements to a line
+// TODO support router
+// TODO support dll
+
 func applyReplacements(line string, patterns []*regexp.Regexp, replacements []string) string {
 	result := line
 	for i, re := range patterns {
 		result = re.ReplaceAllString(result, replacements[i])
 	}
 	return result
-}
-
-// captureLineByLine reads from input line by line, writes each line to both
-// output (for passthrough) and to individual timestamped files in captureDir
-func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName string, patterns []*regexp.Regexp, replacements []string) {
-	scanner := bufio.NewScanner(input)
-	lineCounter := 0
-
-	for scanner.Scan() {
-		originalLine := scanner.Text()
-		lineCounter++
-
-		// Apply regex replacements
-		processedLine := applyReplacements(originalLine, patterns, replacements)
-
-		// Write processed line to output for passthrough
-		fmt.Fprintln(output, processedLine)
-
-		// Create individual file for this line
-		timestamp := time.Now().Format("20060102_150405.000000")
-		filename := filepath.Join(captureDir, fmt.Sprintf("%s_%s_%04d.txt", timestamp, streamName, lineCounter))
-
-		if err := os.WriteFile(filename, []byte(processedLine), 0644); err != nil {
-			logMsg("Error writing %s line %d to file: %v", streamName, lineCounter, err)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		logMsg("Error reading from %s: %v", streamName, err)
-	}
 }
 
 func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConfig *CompiledConfig) error {
@@ -78,10 +50,6 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 
 	logMsg("Intercepting call to %s, capture dir: %s", nameWithoutExt, captureDir)
 
-	if err := writeEnvironmentFiles(captureDir); err != nil {
-		return err
-	}
-
 	ext := filepath.Ext(exeName)
 	realExeName := strings.TrimSuffix(exeName, ext) + "-real" + ext
 	realExePath := filepath.Join(exeDir, realExeName)
@@ -93,10 +61,13 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 	cmd := exec.Command(realExePath, os.Args[1:]...)
 
 	var err error
-	if compiledConfig.OneFilePerLine {
-		err = runWithLineByLineCapture(cmd, captureDir, compiledConfig, realExePath)
+	if compiledConfig.PcapFile {
+		err = runWithPcapCapture(cmd, captureDir, compiledConfig, realExePath)
 	} else {
-		err = runWithStreamCapture(cmd, captureDir, compiledConfig, realExePath)
+		if err := writeEnvironmentFiles(captureDir); err != nil {
+			return err
+		}
+		err = runWithLineByLineCapture(cmd, captureDir, compiledConfig, realExePath)
 	}
 
 	if err != nil {
@@ -121,6 +92,116 @@ func writeEnvironmentFiles(captureDir string) error {
 		return fmt.Errorf("failed to write arguments: %w", err)
 	}
 	return nil
+}
+
+func runWithPcapCapture(cmd *exec.Cmd, captureDir string, compiledConfig *CompiledConfig, realExePath string) error {
+	pcapFile, err := os.Create(filepath.Join(captureDir, "capture.pcap"))
+	if err != nil {
+		return fmt.Errorf("failed to create pcap file: %w", err)
+	}
+	defer pcapFile.Close()
+
+	pw, err := NewPcapWriter(pcapFile)
+	if err != nil {
+		return fmt.Errorf("failed to initialize pcap writer: %w", err)
+	}
+
+	var mu sync.Mutex
+	writePacket := func(id StreamId, data []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := pw.WritePacket(os.Getpid(), id, data); err != nil {
+			logMsg("Error writing pcap packet: %v", err)
+		}
+	}
+
+	writePacket(StreamEnv, []byte(strings.Join(os.Environ(), "\n")))
+	writePacket(StreamArgv, []byte(strings.Join(os.Args, "\n")))
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		defer stdinPipe.Close()
+		captureStreamToPcap(os.Stdin, stdinPipe, StreamStdin,
+			compiledConfig.StdinReplacements, compiledConfig.StdinReplaceWith, writePacket)
+	}()
+
+	go func() {
+		defer wg.Done()
+		captureStreamToPcap(stdoutPipe, os.Stdout, StreamStdout,
+			compiledConfig.StdoutReplacements, compiledConfig.StdoutReplaceWith, writePacket)
+	}()
+
+	go func() {
+		defer wg.Done()
+		captureStreamToPcap(stderrPipe, os.Stderr, StreamStderr,
+			compiledConfig.StderrReplacements, compiledConfig.StderrReplaceWith, writePacket)
+	}()
+
+	cmd.Env = os.Environ()
+	logMsg("Executing real program: %s with %d args (pcap mode)", realExePath, len(os.Args)-1)
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start real executable: %w", err)
+	}
+
+	wg.Wait()
+	return cmd.Wait()
+}
+
+func captureStreamToPcap(input io.Reader, output io.Writer, id StreamId, patterns []*regexp.Regexp, replacements []string, writePacket func(StreamId, []byte)) {
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		line := scanner.Text()
+		processed := applyReplacements(line, patterns, replacements)
+		fmt.Fprintln(output, processed)
+		writePacket(id, []byte(processed))
+	}
+	if err := scanner.Err(); err != nil {
+		logMsg("Error reading stream: %v", err)
+	}
+}
+
+func captureLineByLine(input io.Reader, output io.Writer, captureDir, streamName string, patterns []*regexp.Regexp, replacements []string) {
+	scanner := bufio.NewScanner(input)
+	lineCounter := 0
+
+	for scanner.Scan() {
+		originalLine := scanner.Text()
+		lineCounter++
+
+		processedLine := applyReplacements(originalLine, patterns, replacements)
+
+		fmt.Fprintln(output, processedLine)
+
+		timestamp := time.Now().Format("20060102_150405.000000")
+		filename := filepath.Join(captureDir, fmt.Sprintf("%s_%s_%04d.txt", timestamp, streamName, lineCounter))
+
+		if err := os.WriteFile(filename, []byte(processedLine), 0644); err != nil {
+			logMsg("Error writing %s line %d to file: %v", streamName, lineCounter, err)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		logMsg("Error reading from %s: %v", streamName, err)
+	}
 }
 
 func runWithLineByLineCapture(cmd *exec.Cmd, captureDir string, compiledConfig *CompiledConfig, realExePath string) error {
@@ -163,86 +244,6 @@ func runWithLineByLineCapture(cmd *exec.Cmd, captureDir string, compiledConfig *
 
 	cmd.Env = os.Environ()
 	logMsg("Executing real program: %s with %d args (one-file-per-line mode)", realExePath, len(os.Args)-1)
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start real executable: %w", err)
-	}
-
-	wg.Wait()
-	return cmd.Wait()
-}
-
-func runWithStreamCapture(cmd *exec.Cmd, captureDir string, compiledConfig *CompiledConfig, realExePath string) error {
-	stdinFile := filepath.Join(captureDir, "stdin.txt")
-	stdinCapture, err := os.Create(stdinFile)
-	if err != nil {
-		return fmt.Errorf("failed to create stdin file: %w", err)
-	}
-	defer stdinCapture.Close()
-	cmd.Stdin = io.TeeReader(os.Stdin, stdinCapture)
-
-	stdoutCapture, err := os.Create(filepath.Join(captureDir, "stdout.txt"))
-	if err != nil {
-		return fmt.Errorf("failed to create stdout file: %w", err)
-	}
-	defer stdoutCapture.Close()
-
-	stderrCapture, err := os.Create(filepath.Join(captureDir, "stderr.txt"))
-	if err != nil {
-		return fmt.Errorf("failed to create stderr file: %w", err)
-	}
-	defer stderrCapture.Close()
-
-	if len(compiledConfig.StdoutReplacements) > 0 || len(compiledConfig.StderrReplacements) > 0 {
-		return runWithRegexReplacements(cmd, stdoutCapture, stderrCapture, compiledConfig, realExePath)
-	}
-
-	cmd.Stdout = io.MultiWriter(os.Stdout, stdoutCapture)
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderrCapture)
-	cmd.Env = os.Environ()
-
-	logMsg("Executing real program: %s with %d args (one-file-per-stream mode)", realExePath, len(os.Args)-1)
-	return cmd.Run()
-}
-
-func runWithRegexReplacements(cmd *exec.Cmd, stdoutCapture, stderrCapture *os.File, compiledConfig *CompiledConfig, realExePath string) error {
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			processedLine := applyReplacements(line, compiledConfig.StdoutReplacements, compiledConfig.StdoutReplaceWith)
-			fmt.Fprintln(os.Stdout, processedLine)
-			fmt.Fprintln(stdoutCapture, processedLine)
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			processedLine := applyReplacements(line, compiledConfig.StderrReplacements, compiledConfig.StderrReplaceWith)
-			fmt.Fprintln(os.Stderr, processedLine)
-			fmt.Fprintln(stderrCapture, processedLine)
-		}
-	}()
-
-	cmd.Env = os.Environ()
-	logMsg("Executing real program: %s with %d args (one-file-per-stream mode with regex)", realExePath, len(os.Args)-1)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start real executable: %w", err)
