@@ -16,6 +16,7 @@ import (
 // TODO support router
 // TODO support dll
 // TODO add lua
+// TODO log everything program touches
 
 func applyReplacements(line string, patterns []*regexp.Regexp, replacements []string) string {
 	result := line
@@ -27,7 +28,6 @@ func applyReplacements(line string, patterns []*regexp.Regexp, replacements []st
 
 func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConfig *CompiledConfig) error {
 	exeDir := filepath.Dir(exePath)
-	timestamp := time.Now().Format("20060102_150405_000")
 
 	baseDir := exeDir
 	if compiledConfig.CapturePath != "" && compiledConfig.CapturePath != "." {
@@ -38,7 +38,13 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 		}
 	}
 
-	captureDir := filepath.Join(baseDir, fmt.Sprintf("capture_%s_%s", nameWithoutExt, timestamp))
+	var captureDir string
+	if compiledConfig.PcapFile {
+		captureDir = baseDir
+	} else {
+		timestamp := time.Now().Format("20060102_150405_000")
+		captureDir = filepath.Join(baseDir, fmt.Sprintf("capture_%s_%s", nameWithoutExt, timestamp))
+	}
 
 	if err := os.MkdirAll(captureDir, 0755); err != nil {
 		return fmt.Errorf("failed to create capture directory: %w", err)
@@ -49,7 +55,7 @@ func executeShimmedProgram(exePath, exeName, nameWithoutExt string, compiledConf
 		defer logFile.Close()
 	}
 
-	logMsg("Intercepting call to %s, capture dir: %s", nameWithoutExt, captureDir)
+	logMsg("Intercepting call to %s, output dir: %s", nameWithoutExt, captureDir)
 
 	ext := filepath.Ext(exeName)
 	realExeName := strings.TrimSuffix(exeName, ext) + "-real" + ext
@@ -96,15 +102,26 @@ func writeEnvironmentFiles(captureDir string) error {
 }
 
 func runWithPcapCapture(cmd *exec.Cmd, captureDir string, compiledConfig *CompiledConfig, realExePath string) error {
-	pcapFile, err := os.Create(filepath.Join(captureDir, "capture.pcap"))
+	pcapPath := filepath.Join(captureDir, "capture.pcap")
+	pcapFile, err := os.OpenFile(pcapPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to create pcap file: %w", err)
+		return fmt.Errorf("failed to open pcap file: %w", err)
 	}
 	defer pcapFile.Close()
 
-	pw, err := NewPcapWriter(pcapFile)
+	fi, err := pcapFile.Stat()
 	if err != nil {
-		return fmt.Errorf("failed to initialize pcap writer: %w", err)
+		return fmt.Errorf("failed to stat pcap file: %w", err)
+	}
+
+	var pw *PcapWriter
+	if fi.Size() == 0 {
+		pw, err = NewPcapWriter(pcapFile)
+		if err != nil {
+			return fmt.Errorf("failed to initialize pcap writer: %w", err)
+		}
+	} else {
+		pw = NewPcapAppendWriter(pcapFile)
 	}
 
 	var mu sync.Mutex

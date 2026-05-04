@@ -51,6 +51,10 @@ func NewPcapWriter(w io.Writer) (*PcapWriter, error) {
 	return pw, err
 }
 
+func NewPcapAppendWriter(w io.Writer) *PcapWriter {
+	return &PcapWriter{w: w, bo: binary.LittleEndian}
+}
+
 func (pw *PcapWriter) writeGlobalHeader() error {
 	hdr := GlobalHeader{
 		Magic:        MagicNumber,
