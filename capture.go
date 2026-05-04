@@ -15,6 +15,7 @@ import (
 
 // TODO support router
 // TODO support dll
+// TODO add lua
 
 func applyReplacements(line string, patterns []*regexp.Regexp, replacements []string) string {
 	result := line
