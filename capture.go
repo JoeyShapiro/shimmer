@@ -17,6 +17,7 @@ import (
 // TODO support dll
 // TODO add lua
 // TODO log everything program touches
+// TODO test session stuff works
 
 func applyReplacements(line string, patterns []*regexp.Regexp, replacements []string) string {
 	result := line

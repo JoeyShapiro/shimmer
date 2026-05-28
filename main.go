@@ -28,7 +28,7 @@ func run() error {
 	exeName := filepath.Base(exePath)
 	nameWithoutExt := strings.TrimSuffix(exeName, filepath.Ext(exeName))
 
-	if nameWithoutExt == "shimmer" {
+	if nameWithoutExt == "shmitm" {
 		return handleMetaCommands()
 	}
 
@@ -49,18 +49,18 @@ func handleMetaCommands() error {
 
 	command := os.Args[1]
 	switch command {
-	case "setup":
+	case "shim":
 		if len(os.Args) < 3 {
-			return errors.New("usage: shimmer setup <program>")
+			return errors.New("usage: shmitm shim <program>")
 		}
 		if err := setupShim(os.Args[2]); err != nil {
 			return err
 		}
 		fmt.Printf("Successfully shimmed %s\n", os.Args[2])
 
-	case "unshim", "remove":
+	case "unshim":
 		if len(os.Args) < 3 {
-			return errors.New("usage: shimmer unshim <program>")
+			return errors.New("usage: shmitm unshim <program>")
 		}
 		if err := unshim(os.Args[2]); err != nil {
 			return err
@@ -73,8 +73,8 @@ func handleMetaCommands() error {
 }
 
 func printUsage() {
-	fmt.Println("Usage: shimmer <command> [args]")
+	fmt.Println("Usage: shmitm <command> [args]")
 	fmt.Println("Commands:")
-	fmt.Println("  setup <program>    - Create a shim for the specified program")
+	fmt.Println("  shim <program>     - Create a shim for the specified program")
 	fmt.Println("  unshim <program>   - Remove shim and restore original program")
 }
