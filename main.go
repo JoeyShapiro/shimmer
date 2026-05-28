@@ -66,6 +66,12 @@ func handleMetaCommands() error {
 			return err
 		}
 
+	case "monitor":
+		if len(os.Args) < 3 {
+			return errors.New("usage: shmitm monitor <program> [args...]")
+		}
+		return monitorBinary(os.Args[2])
+
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
@@ -77,4 +83,5 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  shim <program>     - Create a shim for the specified program")
 	fmt.Println("  unshim <program>   - Remove shim and restore original program")
+	fmt.Println("  monitor <program>  - Monitor file reads/writes by a program (Windows only)")
 }
