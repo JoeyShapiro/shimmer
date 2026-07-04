@@ -72,6 +72,9 @@ func handleMetaCommands() error {
 		}
 		return monitorBinary(os.Args[2])
 
+	case "mitm":
+		return runMitm()
+
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
@@ -84,4 +87,5 @@ func printUsage() {
 	fmt.Println("  shim <program>     - Create a shim for the specified program")
 	fmt.Println("  unshim <program>   - Remove shim and restore original program")
 	fmt.Println("  monitor <program>  - Monitor file reads/writes by a program (Windows only)")
+	fmt.Println("  mitm [addr]        - Start an HTTP/HTTPS intercepting proxy (default addr 0.0.0.0:8080)")
 }
