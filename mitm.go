@@ -21,9 +21,18 @@ func runMitm() error {
 
 	buf := make([]byte, 1500)
 	for {
-		n, addr, _ := conn.ReadFrom(buf)
-		fmt.Printf("Received %d bytes from %s\n", n, addr.String())
-		fmt.Printf("Packet data: %x\n", buf[:n])
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			fmt.Printf("read error: %v\n", err)
+			continue
+		}
+
+		pkt, err := ParseDHCP(buf[:n])
+		if err != nil {
+			fmt.Printf("Received %d bytes from %s: not DHCP: %v\n", n, addr, err)
+			continue
+		}
+		fmt.Printf("Received %d bytes from %s\n%s", n, addr, pkt)
 	}
 
 	return nil
