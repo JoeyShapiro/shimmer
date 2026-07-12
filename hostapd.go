@@ -193,8 +193,6 @@ func HostAPD(name string) error {
 	beaconTail := []byte{}
 	probeResp := buildBeaconResponse(iface.HardwareAddr, "shmitm", 1)
 
-	fmt.Printf("beacon head: %x\n", beaconHead)
-
 	b, _ := netlink.MarshalAttributes([]netlink.Attribute{
 		{Type: NL80211_ATTR_IFINDEX, Data: nlenc.Uint32Bytes(uint32(iface.Index))},
 		{Type: NL80211_ATTR_SSID, Data: []byte("shmitm")},
@@ -225,6 +223,18 @@ func HostAPD(name string) error {
 	}
 
 	fmt.Println("AP started")
+
+	// event loop — kernel sends you events as devices interact with the AP
+	for {
+		msgs, _, err := conn.Receive()
+		if err != nil {
+			log.Println("receive error:", err)
+			continue
+		}
+		for _, msg := range msgs {
+			fmt.Printf("event cmd=%d\n", msg.Header.Command)
+		}
+	}
 
 	return nil
 }
