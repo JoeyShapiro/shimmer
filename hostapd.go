@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net"
 
 	"github.com/mdlayher/genetlink"
@@ -19,14 +20,32 @@ const (
 	NL80211_ATTR_IFNAME  = 4
 	NL80211_ATTR_IFTYPE  = 5
 	NL80211_ATTR_MAC     = 6
-	NL80211_ATTR_FREQ    = 98
+
+	NL80211_CMD_START_AP         = 15
+	NL80211_ATTR_BEACON_INTERVAL = 12
+	NL80211_ATTR_DTIM_PERIOD     = 13
+	NL80211_ATTR_BEACON_HEAD     = 14
+	NL80211_ATTR_BEACON_TAIL     = 15
+	NL80211_ATTR_WIPHY_FREQ      = 38
+	NL80211_ATTR_SSID            = 52
+	NL80211_ATTR_AUTH_TYPE       = 53
+	NL80211_ATTR_HIDDEN_SSID     = 126
+	NL80211_ATTR_PROBE_RESP      = 145
+
+	NL80211_AUTHTYPE_OPEN_SYSTEM   = 0
+	NL80211_HIDDEN_SSID_NOT_IN_USE = 0
 )
+
+var wiphyIndex uint32
 
 // printInterfaceAttrs pretty-prints the nl80211 attributes we care about
 // for a single interface reply.
 func printInterfaceAttrs(attrs []netlink.Attribute) {
 	for _, attr := range attrs {
 		switch attr.Type {
+		case 1: // NL80211_ATTR_WIPHY
+			wiphyIndex = nlenc.Uint32(attr.Data)
+			fmt.Println("wiphy index:", wiphyIndex)
 		case NL80211_ATTR_IFNAME:
 			fmt.Println("name:", string(attr.Data))
 		case NL80211_ATTR_IFTYPE:
@@ -43,7 +62,7 @@ func printInterfaceAttrs(attrs []netlink.Attribute) {
 			fmt.Printf("mac: %02x:%02x:%02x:%02x:%02x:%02x\n",
 				attr.Data[0], attr.Data[1], attr.Data[2],
 				attr.Data[3], attr.Data[4], attr.Data[5])
-		case NL80211_ATTR_FREQ:
+		case NL80211_ATTR_WIPHY_FREQ:
 			if len(attr.Data) < 4 {
 				fmt.Println("freq: <malformed attribute>")
 				continue
@@ -170,5 +189,106 @@ func HostAPD(name string) error {
 		return err
 	}
 
+	beaconHead := buildBeaconHead(iface.HardwareAddr, "shmitm", 1)
+	beaconTail := []byte{}
+	probeResp := buildBeaconResponse(iface.HardwareAddr, "shmitm", 1)
+
+	fmt.Printf("beacon head: %x\n", beaconHead)
+
+	b, _ := netlink.MarshalAttributes([]netlink.Attribute{
+		{Type: NL80211_ATTR_IFINDEX, Data: nlenc.Uint32Bytes(uint32(iface.Index))},
+		{Type: NL80211_ATTR_SSID, Data: []byte("shmitm")},
+		{Type: NL80211_ATTR_WIPHY_FREQ, Data: nlenc.Uint32Bytes(2412)}, // channel 6
+		{Type: NL80211_ATTR_BEACON_INTERVAL, Data: nlenc.Uint32Bytes(100)},
+		{Type: NL80211_ATTR_DTIM_PERIOD, Data: nlenc.Uint32Bytes(2)},
+		{Type: NL80211_ATTR_BEACON_HEAD, Data: beaconHead},
+		{Type: NL80211_ATTR_BEACON_TAIL, Data: beaconTail},
+		{Type: NL80211_ATTR_AUTH_TYPE, Data: nlenc.Uint32Bytes(NL80211_AUTHTYPE_OPEN_SYSTEM)},
+		{Type: NL80211_ATTR_HIDDEN_SSID, Data: nlenc.Uint32Bytes(NL80211_HIDDEN_SSID_NOT_IN_USE)},
+		{Type: NL80211_ATTR_PROBE_RESP, Data: probeResp},
+		{Type: 1, Data: nlenc.Uint32Bytes(uint32(wiphyIndex))}, // NL80211_ATTR_WIPHY
+	})
+
+	_, err = conn.Send(genetlink.Message{
+		Header: genetlink.Header{
+			Command: NL80211_CMD_START_AP,
+		},
+		Data: b,
+	}, family.ID, netlink.Request|netlink.Acknowledge)
+	if err != nil {
+		log.Fatal("send:", err)
+	}
+
+	_, _, err = conn.Receive()
+	if err != nil {
+		log.Fatal("receive:", err)
+	}
+
+	fmt.Println("AP started")
+
 	return nil
+}
+
+func buildBeaconHead(mac net.HardwareAddr, ssid string, channel uint8) []byte {
+	b := []byte{}
+
+	// MAC header
+	b = append(b, 0x80, 0x00)                         // frame control: type=management, subtype=beacon
+	b = append(b, 0x00, 0x00)                         // duration
+	b = append(b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff) // dst broadcast
+	b = append(b, mac...)                             // src
+	b = append(b, mac...)                             // bssid
+
+	b = append(b, 0x00, 0x00) // sequence
+
+	// fixed fields
+	b = append(b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // timestamp
+	b = append(b, 0x64, 0x00)                                     // beacon interval 100
+	b = append(b, 0x21, 0x04)                                     // capability
+
+	// SSID IE
+	b = append(b, 0x00)
+	b = append(b, byte(len(ssid)))
+	b = append(b, []byte(ssid)...)
+
+	// supported rates IE
+	b = append(b, 0x01, 0x08)
+	b = append(b, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24)
+
+	// DS parameter set IE (channel)
+	b = append(b, 0x03, 0x01, channel)
+
+	return b
+}
+
+func buildBeaconResponse(mac net.HardwareAddr, ssid string, channel uint8) []byte {
+	b := []byte{}
+
+	// MAC header
+	b = append(b, 0x50, 0x00)                         // frame control: type=management, subtype=probe-respond
+	b = append(b, 0x00, 0x00)                         // duration
+	b = append(b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff) // dst broadcast
+	b = append(b, mac...)                             // src
+	b = append(b, mac...)                             // bssid
+
+	b = append(b, 0x00, 0x00) // sequence
+
+	// fixed fields
+	b = append(b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // timestamp
+	b = append(b, 0x64, 0x00)                                     // beacon interval 100
+	b = append(b, 0x21, 0x04)                                     // capability
+
+	// SSID IE
+	b = append(b, 0x00)
+	b = append(b, byte(len(ssid)))
+	b = append(b, []byte(ssid)...)
+
+	// supported rates IE
+	b = append(b, 0x01, 0x08)
+	b = append(b, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24)
+
+	// DS parameter set IE (channel)
+	b = append(b, 0x03, 0x01, channel)
+
+	return b
 }
