@@ -21,6 +21,12 @@ func main() {
 }
 
 func run() error {
+	family, err := StartAPD("wlp0s20f0u13")
+	if err != nil {
+		return fmt.Errorf("failed to resolve nl80211 family: %w", err)
+	}
+	fmt.Printf("Resolved nl80211 family ID: %d\n", family)
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
