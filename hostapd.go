@@ -144,49 +144,49 @@ func setInterfaceType(conn *genetlink.Conn, familyID uint16, ifindex int, iftype
 	return nil
 }
 
-func HostAPD(name string) error {
+func HostAPD(name string) (*net.Interface, error) {
 	conn, err := genetlink.Dial(nil)
 	if err != nil {
-		return fmt.Errorf("dial genetlink: %w", err)
+		return nil, fmt.Errorf("dial genetlink: %w", err)
 	}
 	defer conn.Close()
 
 	family, err := conn.GetFamily("nl80211")
 	if err != nil {
-		return fmt.Errorf("get nl80211 family: %w", err)
+		return nil, fmt.Errorf("get nl80211 family: %w", err)
 	}
 	fmt.Println("Resolved nl80211 family ID:", family.ID)
 
 	iface, err := net.InterfaceByName(name)
 	if err != nil {
-		return fmt.Errorf("lookup interface %q: %w", name, err)
+		return nil, fmt.Errorf("lookup interface %q: %w", name, err)
 	}
 
 	if err := queryInterface(conn, family.ID, iface.Index); err != nil {
-		return err
+		return nil, err
 	}
 
 	// turn into AP mode
 	link, err := linkup.LinkByName(name)
 	if err != nil {
-		return fmt.Errorf("lookup link %q: %w", name, err)
+		return nil, fmt.Errorf("lookup link %q: %w", name, err)
 	}
 
 	if err := linkup.LinkSetDown(link); err != nil {
-		return fmt.Errorf("set link down: %w", err)
+		return nil, fmt.Errorf("set link down: %w", err)
 	}
 
 	if err := setInterfaceType(conn, family.ID, iface.Index, NL80211_IFTYPE_AP); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := linkup.LinkSetUp(link); err != nil {
-		return fmt.Errorf("set link up: %w", err)
+		return nil, fmt.Errorf("set link up: %w", err)
 	}
 
 	// verify
 	if err := queryInterface(conn, family.ID, iface.Index); err != nil {
-		return err
+		return nil, err
 	}
 
 	beaconHead := buildBeaconHead(iface.HardwareAddr, "shmitm", 1)
@@ -224,19 +224,7 @@ func HostAPD(name string) error {
 
 	fmt.Println("AP started")
 
-	// event loop — kernel sends you events as devices interact with the AP
-	for {
-		msgs, _, err := conn.Receive()
-		if err != nil {
-			log.Println("receive error:", err)
-			continue
-		}
-		for _, msg := range msgs {
-			fmt.Printf("event cmd=%d\n", msg.Header.Command)
-		}
-	}
-
-	return nil
+	return iface, nil
 }
 
 func buildBeaconHead(mac net.HardwareAddr, ssid string, channel uint8) []byte {

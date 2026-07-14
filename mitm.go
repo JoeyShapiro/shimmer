@@ -15,6 +15,20 @@ const (
 )
 
 func runMitm() error {
+	iface, err := HostAPD("wlp0s20f0u13")
+	if err != nil {
+		return fmt.Errorf("failed to resolve nl80211 family: %w", err)
+	}
+	fmt.Println("Successfully set interface to AP mode")
+
+	mgmtConn, err := openMgmtListener(iface.Index)
+	if err != nil {
+		return fmt.Errorf("failed to set up management-frame listener: %w", err)
+	}
+	defer mgmtConn.Close()
+	go listenMgmtFrames(mgmtConn)
+	fmt.Println("Listening for 802.11 management frames...")
+
 	conn, err := net.ListenPacket("udp4", "0.0.0.0:67")
 	if err != nil {
 		return fmt.Errorf("failed to listen on UDP port 67: %w", err)
