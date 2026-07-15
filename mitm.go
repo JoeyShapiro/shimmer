@@ -26,7 +26,14 @@ func runMitm() error {
 		return fmt.Errorf("failed to set up management-frame listener: %w", err)
 	}
 	defer mgmtConn.Close()
-	go listenMgmtFrames(mgmtConn)
+
+	mgmtResp, err := newMgmtResponder(iface.Index, iface.HardwareAddr)
+	if err != nil {
+		return fmt.Errorf("failed to set up management-frame responder: %w", err)
+	}
+	defer mgmtResp.Close()
+
+	go listenMgmtFrames(mgmtConn, mgmtResp)
 	fmt.Println("Listening for 802.11 management frames...")
 
 	conn, err := net.ListenPacket("udp4", "0.0.0.0:67")

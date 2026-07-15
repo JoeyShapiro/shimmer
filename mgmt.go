@@ -139,11 +139,106 @@ func openMgmtListener(ifindex int) (*genetlink.Conn, error) {
 	return conn, nil
 }
 
-// listenMgmtFrames blocks, logging every management frame the kernel
-// delivers on conn. This is step one of handling client connections: before
-// building actual authentication/association replies, confirm the client's
-// frames are reaching us at all.
-func listenMgmtFrames(conn *genetlink.Conn) {
+// mgmtResponder replies to client management frames. It holds its own
+// genetlink connection, separate from the one used to listen for incoming
+// frames: that connection is joined to the "mlme" multicast group and is
+// only ever read from a single goroutine, so a synchronous request/reply
+// issued on it (send a command, then read back its ack) could easily read
+// an unrelated broadcast frame notification instead of its own ack. Keeping
+// a dedicated connection for outbound commands (used only for
+// request/reply, never joined to any multicast group) avoids that.
+type mgmtResponder struct {
+	conn     *genetlink.Conn
+	familyID uint16
+	ifindex  int
+	apMAC    net.HardwareAddr
+}
+
+// newMgmtResponder dials a fresh genetlink connection for transmitting
+// frames and station commands back to clients on ifindex.
+func newMgmtResponder(ifindex int, apMAC net.HardwareAddr) (*mgmtResponder, error) {
+	conn, err := genetlink.Dial(nil)
+	if err != nil {
+		return nil, fmt.Errorf("dial genetlink: %w", err)
+	}
+
+	family, err := conn.GetFamily("nl80211")
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("get nl80211 family: %w", err)
+	}
+
+	return &mgmtResponder{conn: conn, familyID: family.ID, ifindex: ifindex, apMAC: apMAC}, nil
+}
+
+func (r *mgmtResponder) Close() error {
+	return r.conn.Close()
+}
+
+// sendFrame transmits a raw 802.11 frame on the AP's operating channel and
+// waits for the kernel to ack accepting it for transmission.
+func (r *mgmtResponder) sendFrame(frame []byte) error {
+	b, err := netlink.MarshalAttributes([]netlink.Attribute{
+		{Type: NL80211_ATTR_IFINDEX, Data: nlenc.Uint32Bytes(uint32(r.ifindex))},
+		{Type: NL80211_ATTR_WIPHY_FREQ, Data: nlenc.Uint32Bytes(apFreqMHz)},
+		{Type: NL80211_ATTR_FRAME, Data: frame},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal FRAME attributes: %w", err)
+	}
+
+	_, err = r.conn.Send(genetlink.Message{
+		Header: genetlink.Header{Command: NL80211_CMD_FRAME},
+		Data:   b,
+	}, r.familyID, netlink.Request|netlink.Acknowledge)
+	if err != nil {
+		return fmt.Errorf("send FRAME: %w", err)
+	}
+
+	if _, _, err := r.conn.Receive(); err != nil {
+		return fmt.Errorf("receive FRAME ack: %w", err)
+	}
+	return nil
+}
+
+// handleAuth replies to an open-system authentication request from client
+// with a success response, the second half of the (single round-trip) open
+// system auth handshake.
+func (r *mgmtResponder) handleAuth(client net.HardwareAddr) {
+	resp := buildAuthResponse(r.apMAC, client)
+	if err := r.sendFrame(resp); err != nil {
+		fmt.Printf("mgmt: failed to send auth response to %s: %v\n", client, err)
+		return
+	}
+	fmt.Printf("mgmt: sent auth response to %s\n", client)
+}
+
+// buildAuthResponse builds an open-system authentication frame (algorithm 0,
+// transaction sequence 2, status success) addressed from apMAC to client.
+// Mirrors the MAC header layout in buildBeaconHead/buildBeaconResponse.
+func buildAuthResponse(apMAC, client net.HardwareAddr) []byte {
+	b := []byte{}
+
+	// MAC header
+	b = append(b, 0xb0, 0x00) // frame control: type=management, subtype=auth
+	b = append(b, 0x00, 0x00) // duration
+	b = append(b, client...)  // dst
+	b = append(b, apMAC...)   // src
+	b = append(b, apMAC...)   // bssid
+
+	b = append(b, 0x00, 0x00) // sequence
+
+	// auth fixed fields
+	b = append(b, 0x00, 0x00) // algorithm 0 = open system
+	b = append(b, 0x02, 0x00) // transaction sequence number 2 (response)
+	b = append(b, 0x00, 0x00) // status code 0 = successful
+
+	return b
+}
+
+// listenMgmtFrames blocks, dispatching every management frame the kernel
+// delivers on conn to resp.
+func listenMgmtFrames(conn *genetlink.Conn, resp *mgmtResponder) {
 	for {
 		msgs, _, err := conn.Receive()
 		if err != nil {
@@ -175,6 +270,10 @@ func listenMgmtFrames(conn *genetlink.Conn) {
 			fc := frame[0]
 			src := net.HardwareAddr(append([]byte(nil), frame[10:16]...))
 			fmt.Printf("mgmt: %s from %s\n", mgmtSubtypeName(fc), src)
+
+			if fc == ieee80211FCAuth {
+				resp.handleAuth(src)
+			}
 		}
 	}
 }

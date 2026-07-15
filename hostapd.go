@@ -36,6 +36,14 @@ const (
 	NL80211_HIDDEN_SSID_NOT_IN_USE = 0
 )
 
+// AP operating channel. Beacons/probe responses advertise this, and any
+// frame we transmit back to a client (auth/assoc responses) must be sent on
+// the same frequency or the radio won't put it on the air at the right time.
+const (
+	apChannel = 1
+	apFreqMHz = 2412
+)
+
 var wiphyIndex uint32
 
 // printInterfaceAttrs pretty-prints the nl80211 attributes we care about
@@ -189,14 +197,14 @@ func HostAPD(name string) (*net.Interface, error) {
 		return nil, err
 	}
 
-	beaconHead := buildBeaconHead(iface.HardwareAddr, "shmitm", 1)
+	beaconHead := buildBeaconHead(iface.HardwareAddr, "shmitm", apChannel)
 	beaconTail := []byte{}
-	probeResp := buildBeaconResponse(iface.HardwareAddr, "shmitm", 1)
+	probeResp := buildBeaconResponse(iface.HardwareAddr, "shmitm", apChannel)
 
 	b, _ := netlink.MarshalAttributes([]netlink.Attribute{
 		{Type: NL80211_ATTR_IFINDEX, Data: nlenc.Uint32Bytes(uint32(iface.Index))},
 		{Type: NL80211_ATTR_SSID, Data: []byte("shmitm")},
-		{Type: NL80211_ATTR_WIPHY_FREQ, Data: nlenc.Uint32Bytes(2412)}, // channel 6
+		{Type: NL80211_ATTR_WIPHY_FREQ, Data: nlenc.Uint32Bytes(apFreqMHz)},
 		{Type: NL80211_ATTR_BEACON_INTERVAL, Data: nlenc.Uint32Bytes(100)},
 		{Type: NL80211_ATTR_DTIM_PERIOD, Data: nlenc.Uint32Bytes(2)},
 		{Type: NL80211_ATTR_BEACON_HEAD, Data: beaconHead},
