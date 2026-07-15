@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 
@@ -14,11 +15,30 @@ import (
 const (
 	NL80211_CMD_REGISTER_FRAME = 58
 	NL80211_CMD_FRAME          = 59
+	NL80211_CMD_NEW_STATION    = 19
 
-	NL80211_ATTR_FRAME       = 51
-	NL80211_ATTR_FRAME_MATCH = 91
-	NL80211_ATTR_FRAME_TYPE  = 101
+	NL80211_ATTR_FRAME               = 51
+	NL80211_ATTR_FRAME_MATCH         = 91
+	NL80211_ATTR_FRAME_TYPE          = 101
+	NL80211_ATTR_STA_AID             = 16
+	NL80211_ATTR_STA_FLAGS2          = 67
+	NL80211_ATTR_STA_LISTEN_INTERVAL = 18
+	NL80211_ATTR_STA_SUPPORTED_RATES = 19
 )
+
+// Bit positions within struct nl80211_sta_flag_update's mask/set fields (enum
+// nl80211_sta_flags). Setting all three at once on NEW_STATION is only
+// correct for an open (no-security) network: there's no 802.1X/4-way
+// handshake to wait for before authorizing the station.
+const (
+	nl80211StaFlagAuthorized    = 1 << 1
+	nl80211StaFlagAuthenticated = 1 << 5
+	nl80211StaFlagAssociated    = 1 << 7
+)
+
+// staAID is the association ID we hand every client. Fine for now since
+// there's only ever one station tracked at a time.
+const staAID = 1
 
 // 802.11 frame control type/subtype byte (the first byte of the MAC header):
 // type occupies bits 2-3, subtype bits 4-7. These match the values already
@@ -213,6 +233,64 @@ func (r *mgmtResponder) handleAuth(client net.HardwareAddr) {
 	fmt.Printf("mgmt: sent auth response to %s\n", client)
 }
 
+// handleAssocReq registers the client with the driver via NEW_STATION, then
+// replies with a successful association response. The station must be
+// registered first: the instant the client sees a successful association
+// response it may start sending data frames (ARP, DHCP), and mac80211's
+// default behavior on receiving a data frame from a station it doesn't know
+// about is to immediately deauth it ("class 3 frame from non-associated
+// station"). Sending the response first leaves exactly that race.
+func (r *mgmtResponder) handleAssocReq(client net.HardwareAddr, frame []byte) {
+	listenInterval := assocRequestListenInterval(frame)
+	if err := r.newStation(client, staAID, listenInterval); err != nil {
+		fmt.Printf("mgmt: failed to add station %s: %v\n", client, err)
+		return
+	}
+	fmt.Printf("mgmt: added station %s (aid=%d)\n", client, staAID)
+
+	resp := buildAssocResponse(r.apMAC, client, staAID)
+	if err := r.sendFrame(resp); err != nil {
+		fmt.Printf("mgmt: failed to send assoc response to %s: %v\n", client, err)
+		return
+	}
+	fmt.Printf("mgmt: sent assoc response to %s\n", client)
+}
+
+// newStation registers client with the driver as authenticated, associated,
+// and (since this is an open network) authorized, so it starts accepting
+// and forwarding the station's data frames.
+func (r *mgmtResponder) newStation(client net.HardwareAddr, aid, listenInterval uint16) error {
+	mask := uint32(nl80211StaFlagAuthenticated | nl80211StaFlagAssociated | nl80211StaFlagAuthorized)
+	staFlags := make([]byte, 8)
+	nlenc.PutUint32(staFlags[0:4], mask) // mask: which flags this update touches
+	nlenc.PutUint32(staFlags[4:8], mask) // set: turn all of them on
+
+	b, err := netlink.MarshalAttributes([]netlink.Attribute{
+		{Type: NL80211_ATTR_IFINDEX, Data: nlenc.Uint32Bytes(uint32(r.ifindex))},
+		{Type: NL80211_ATTR_MAC, Data: client},
+		{Type: NL80211_ATTR_STA_AID, Data: nlenc.Uint16Bytes(aid)},
+		{Type: NL80211_ATTR_STA_LISTEN_INTERVAL, Data: nlenc.Uint16Bytes(listenInterval)},
+		{Type: NL80211_ATTR_STA_SUPPORTED_RATES, Data: apSupportedRates},
+		{Type: NL80211_ATTR_STA_FLAGS2, Data: staFlags},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal NEW_STATION attributes: %w", err)
+	}
+
+	_, err = r.conn.Send(genetlink.Message{
+		Header: genetlink.Header{Command: NL80211_CMD_NEW_STATION},
+		Data:   b,
+	}, r.familyID, netlink.Request|netlink.Acknowledge)
+	if err != nil {
+		return fmt.Errorf("send NEW_STATION: %w", err)
+	}
+
+	if _, _, err := r.conn.Receive(); err != nil {
+		return fmt.Errorf("receive NEW_STATION ack: %w", err)
+	}
+	return nil
+}
+
 // buildAuthResponse builds an open-system authentication frame (algorithm 0,
 // transaction sequence 2, status success) addressed from apMAC to client.
 // Mirrors the MAC header layout in buildBeaconHead/buildBeaconResponse.
@@ -232,6 +310,46 @@ func buildAuthResponse(apMAC, client net.HardwareAddr) []byte {
 	b = append(b, 0x00, 0x00) // algorithm 0 = open system
 	b = append(b, 0x02, 0x00) // transaction sequence number 2 (response)
 	b = append(b, 0x00, 0x00) // status code 0 = successful
+
+	return b
+}
+
+// assocRequestListenInterval reads the Listen Interval fixed field out of an
+// association request frame (Capability Info at [24:26], Listen Interval at
+// [26:28], right after the 24-byte MAC header), falling back to 1 if the
+// frame is too short to contain it.
+func assocRequestListenInterval(frame []byte) uint16 {
+	if len(frame) < 28 {
+		return 1
+	}
+	return binary.LittleEndian.Uint16(frame[26:28])
+}
+
+// buildAssocResponse builds a successful association response addressed
+// from apMAC to client, echoing the same capability info and supported
+// rates advertised in our beacons.
+func buildAssocResponse(apMAC, client net.HardwareAddr, aid uint16) []byte {
+	b := []byte{}
+
+	// MAC header
+	b = append(b, 0x10, 0x00) // frame control: type=management, subtype=assoc-resp
+	b = append(b, 0x00, 0x00) // duration
+	b = append(b, client...)  // dst
+	b = append(b, apMAC...)   // src
+	b = append(b, apMAC...)   // bssid
+
+	b = append(b, 0x00, 0x00) // sequence
+
+	// assoc-resp fixed fields
+	b = append(b, apCapabilityInfo...) // capability, same as our beacons
+	b = append(b, 0x00, 0x00)          // status code 0 = successful
+	aidField := make([]byte, 2)
+	binary.LittleEndian.PutUint16(aidField, 0xc000|aid) // top 2 bits reserved-as-1 per spec
+	b = append(b, aidField...)
+
+	// supported rates IE
+	b = append(b, 0x01, byte(len(apSupportedRates)))
+	b = append(b, apSupportedRates...)
 
 	return b
 }
@@ -271,8 +389,11 @@ func listenMgmtFrames(conn *genetlink.Conn, resp *mgmtResponder) {
 			src := net.HardwareAddr(append([]byte(nil), frame[10:16]...))
 			fmt.Printf("mgmt: %s from %s\n", mgmtSubtypeName(fc), src)
 
-			if fc == ieee80211FCAuth {
+			switch fc {
+			case ieee80211FCAuth:
 				resp.handleAuth(src)
+			case ieee80211FCAssocReq:
+				resp.handleAssocReq(src, frame)
 			}
 		}
 	}

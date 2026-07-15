@@ -44,6 +44,16 @@ const (
 	apFreqMHz = 2412
 )
 
+// apSupportedRates is the Supported Rates IE payload advertised in our
+// beacons/probe responses. Auth/assoc handling (mgmt.go) echoes the same
+// rates back to the client, so it's shared here rather than duplicated.
+var apSupportedRates = []byte{0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24}
+
+// apCapabilityInfo is the Capability Information field advertised in our
+// beacons/probe responses (ESS + short preamble + short slot time). The
+// association response mgmt.go sends must echo the same bits back.
+var apCapabilityInfo = []byte{0x21, 0x04}
+
 var wiphyIndex uint32
 
 // printInterfaceAttrs pretty-prints the nl80211 attributes we care about
@@ -250,7 +260,7 @@ func buildBeaconHead(mac net.HardwareAddr, ssid string, channel uint8) []byte {
 	// fixed fields
 	b = append(b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // timestamp
 	b = append(b, 0x64, 0x00)                                     // beacon interval 100
-	b = append(b, 0x21, 0x04)                                     // capability
+	b = append(b, apCapabilityInfo...)                            // capability
 
 	// SSID IE
 	b = append(b, 0x00)
@@ -258,8 +268,8 @@ func buildBeaconHead(mac net.HardwareAddr, ssid string, channel uint8) []byte {
 	b = append(b, []byte(ssid)...)
 
 	// supported rates IE
-	b = append(b, 0x01, 0x08)
-	b = append(b, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24)
+	b = append(b, 0x01, byte(len(apSupportedRates)))
+	b = append(b, apSupportedRates...)
 
 	// DS parameter set IE (channel)
 	b = append(b, 0x03, 0x01, channel)
@@ -282,7 +292,7 @@ func buildBeaconResponse(mac net.HardwareAddr, ssid string, channel uint8) []byt
 	// fixed fields
 	b = append(b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // timestamp
 	b = append(b, 0x64, 0x00)                                     // beacon interval 100
-	b = append(b, 0x21, 0x04)                                     // capability
+	b = append(b, apCapabilityInfo...)                            // capability
 
 	// SSID IE
 	b = append(b, 0x00)
@@ -290,8 +300,8 @@ func buildBeaconResponse(mac net.HardwareAddr, ssid string, channel uint8) []byt
 	b = append(b, []byte(ssid)...)
 
 	// supported rates IE
-	b = append(b, 0x01, 0x08)
-	b = append(b, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24)
+	b = append(b, 0x01, byte(len(apSupportedRates)))
+	b = append(b, apSupportedRates...)
 
 	// DS parameter set IE (channel)
 	b = append(b, 0x03, 0x01, channel)
