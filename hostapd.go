@@ -202,6 +202,22 @@ func HostAPD(name string) (*net.Interface, error) {
 		return nil, fmt.Errorf("set link up: %w", err)
 	}
 
+	// Give the interface an address in the DHCP pool's subnet. Without this,
+	// the kernel has no local route justifying a 0.0.0.0-sourced broadcast
+	// (what every DHCP client sends before it has an address), and strict
+	// reverse-path filtering silently drops those packets before they ever
+	// reach a socket — even though they're still visible to a raw capture
+	// like tcpdump, which taps the frame earlier, before IP routing.
+	apAddr := &linkup.Addr{
+		IPNet: &net.IPNet{
+			IP:   net.ParseIP(dhcpServerIP).To4(),
+			Mask: net.IPMask(net.ParseIP(dhcpSubnet).To4()),
+		},
+	}
+	if err := linkup.AddrAdd(link, apAddr); err != nil {
+		return nil, fmt.Errorf("assign %s to %q: %w", dhcpServerIP, name, err)
+	}
+
 	// verify
 	if err := queryInterface(conn, family.ID, iface.Index); err != nil {
 		return nil, err

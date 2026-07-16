@@ -4,7 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -42,9 +43,15 @@ func runMitm() error {
 	}
 	defer conn.Close()
 
+	// This box is multi-homed (the AP interface plus whatever else, e.g.
+	// wired ethernet). Without SO_BINDTODEVICE, a reply to 255.255.255.255
+	// is ambiguous: the kernel's routing code picks *an* interface to send
+	// it out of, which need not be the one the client is actually on. Pin
+	// the socket to the AP interface so both directions are unambiguous.
 	rawConn, _ := conn.(*net.UDPConn).SyscallConn()
 	rawConn.Control(func(fd uintptr) {
-		syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+		unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
+		unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, iface.Name)
 	})
 	fmt.Println("Listening for DHCP packets on UDP port 67...")
 
