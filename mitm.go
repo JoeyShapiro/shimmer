@@ -13,14 +13,22 @@ const (
 	dhcpPoolStart = "10.0.0.100"
 	dhcpSubnet    = "255.255.255.0"
 	dhcpLeaseSecs = 3600
+
+	apIfaceName  = "wlp0s20f0u13"
+	wanIfaceName = "eno1" // the interface with actual internet access
 )
 
 func runMitm() error {
-	iface, err := HostAPD("wlp0s20f0u13")
+	iface, err := HostAPD(apIfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to resolve nl80211 family: %w", err)
 	}
 	fmt.Println("Successfully set interface to AP mode")
+
+	if err := setupNAT(apIfaceName, wanIfaceName); err != nil {
+		return fmt.Errorf("failed to set up NAT/forwarding: %w", err)
+	}
+	fmt.Println("Forwarding and NATing to", wanIfaceName)
 
 	mgmtConn, err := openMgmtListener(iface.Index)
 	if err != nil {
@@ -49,6 +57,7 @@ func runMitm() error {
 	// it out of, which need not be the one the client is actually on. Pin
 	// the socket to the AP interface so both directions are unambiguous.
 	rawConn, _ := conn.(*net.UDPConn).SyscallConn()
+	// TODO why use unix
 	rawConn.Control(func(fd uintptr) {
 		unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
 		unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, iface.Name)
