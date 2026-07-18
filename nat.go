@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -93,6 +94,7 @@ func setupNAT(lanIface, wanIface string) error {
 				Xor:            binaryutil.NativeEndian.PutUint32(0),
 			},
 			&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: []byte{0, 0, 0, 0}},
+			&expr.Counter{},
 			&expr.Verdict{Kind: expr.VerdictAccept},
 		},
 	})
@@ -106,6 +108,7 @@ func setupNAT(lanIface, wanIface string) error {
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifnameAttr(lanIface)},
 			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 2},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 2, Data: ifnameAttr(wanIface)},
+			&expr.Counter{},
 			&expr.Verdict{Kind: expr.VerdictAccept},
 		},
 	})
@@ -125,6 +128,7 @@ func setupNAT(lanIface, wanIface string) error {
 		Exprs: []expr.Any{
 			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifnameAttr(wanIface)},
+			&expr.Counter{},
 			&expr.Masq{},
 		},
 	})
@@ -132,5 +136,47 @@ func setupNAT(lanIface, wanIface string) error {
 	if err := conn.Flush(); err != nil {
 		return fmt.Errorf("apply nftables ruleset: %w", err)
 	}
+
+	go watchNATCounters(table, forward, postrouting)
+
 	return nil
+}
+
+// watchNATCounters polls the counters on setupNAT's rules and logs whenever
+// one changes. It's a live, dependency-free substitute for `nft list
+// ruleset` (which needs the nft binary, not necessarily installed) — proof,
+// from inside the program itself, of whether traffic is actually reaching
+// each rule.
+func watchNATCounters(table *nftables.Table, chains ...*nftables.Chain) {
+	conn, err := nftables.New()
+	if err != nil {
+		fmt.Printf("nat: failed to open counter watcher: %v\n", err)
+		return
+	}
+
+	last := map[string]uint64{}
+	for {
+		time.Sleep(2 * time.Second)
+
+		for _, chain := range chains {
+			rules, err := conn.GetRules(table, chain)
+			if err != nil {
+				fmt.Printf("nat: failed to read %q counters: %v\n", chain.Name, err)
+				continue
+			}
+			for i, r := range rules {
+				for _, e := range r.Exprs {
+					c, ok := e.(*expr.Counter)
+					if !ok {
+						continue
+					}
+					key := fmt.Sprintf("%s[%d]", chain.Name, i)
+					if c.Packets != last[key] {
+						last[key] = c.Packets
+						fmt.Printf("nat: %s: %d packets, %d bytes\n", key, c.Packets, c.Bytes)
+					}
+				}
+			}
+		}
+	}
 }

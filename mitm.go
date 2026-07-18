@@ -45,6 +45,15 @@ func runMitm() error {
 	go listenMgmtFrames(mgmtConn, mgmtResp)
 	fmt.Println("Listening for 802.11 management frames...")
 
+	dnsConn, err := openDNSListener(iface)
+	if err != nil {
+		return fmt.Errorf("failed to set up DNS forwarder: %w", err)
+	}
+	defer dnsConn.Close()
+
+	go forwardDNSQueries(dnsConn)
+	fmt.Println("Forwarding DNS queries to", dnsUpstream)
+
 	conn, err := net.ListenPacket("udp4", "0.0.0.0:67")
 	if err != nil {
 		return fmt.Errorf("failed to listen on UDP port 67: %w", err)
