@@ -223,6 +223,12 @@ func HostAPD(name string) (*net.Interface, error) {
 		return nil, err
 	}
 
+	htCaps, err := queryWiphyHTCapabilities(conn, family.ID, wiphyIndex)
+	if err != nil {
+		return nil, fmt.Errorf("query HT capabilities: %w", err)
+	}
+	fmt.Println("HT capabilities:", htCaps)
+
 	beaconHead := buildBeaconHead(iface.HardwareAddr, "shmitm", apChannel)
 	beaconTail := []byte{}
 	probeResp := buildBeaconResponse(iface.HardwareAddr, "shmitm", apChannel)
