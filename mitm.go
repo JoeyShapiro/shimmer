@@ -9,8 +9,15 @@ import (
 )
 
 const (
-	dhcpServerIP  = "10.0.0.1"
-	dhcpPoolStart = "10.0.0.100"
+	// 10.42.0.0/24, not 192.168.0/1.x or 10.0.0.x: those are by far the most
+	// common home-router defaults, and colliding with whatever network the
+	// router box's *other* interface is already on breaks its own routing
+	// (this exact collision is what caused the router itself to lose its
+	// route to the real internet gateway once the AP came up). This matches
+	// the subnet NetworkManager's own hotspot feature uses, for the same
+	// reason.
+	dhcpServerIP  = "10.42.0.1"
+	dhcpPoolStart = "10.42.0.100"
 	dhcpSubnet    = "255.255.255.0"
 	dhcpLeaseSecs = 3600
 
