@@ -162,44 +162,44 @@ func setInterfaceType(conn *genetlink.Conn, familyID uint16, ifindex int, iftype
 	return nil
 }
 
-func HostAPD(name string) (*net.Interface, error) {
+func HostAPD(name string) (*net.Interface, htCapabilities, error) {
 	conn, err := genetlink.Dial(nil)
 	if err != nil {
-		return nil, fmt.Errorf("dial genetlink: %w", err)
+		return nil, htCapabilities{}, fmt.Errorf("dial genetlink: %w", err)
 	}
 	defer conn.Close()
 
 	family, err := conn.GetFamily("nl80211")
 	if err != nil {
-		return nil, fmt.Errorf("get nl80211 family: %w", err)
+		return nil, htCapabilities{}, fmt.Errorf("get nl80211 family: %w", err)
 	}
 	fmt.Println("Resolved nl80211 family ID:", family.ID)
 
 	iface, err := net.InterfaceByName(name)
 	if err != nil {
-		return nil, fmt.Errorf("lookup interface %q: %w", name, err)
+		return nil, htCapabilities{}, fmt.Errorf("lookup interface %q: %w", name, err)
 	}
 
 	if err := queryInterface(conn, family.ID, iface.Index); err != nil {
-		return nil, err
+		return nil, htCapabilities{}, err
 	}
 
 	// turn into AP mode
 	link, err := linkup.LinkByName(name)
 	if err != nil {
-		return nil, fmt.Errorf("lookup link %q: %w", name, err)
+		return nil, htCapabilities{}, fmt.Errorf("lookup link %q: %w", name, err)
 	}
 
 	if err := linkup.LinkSetDown(link); err != nil {
-		return nil, fmt.Errorf("set link down: %w", err)
+		return nil, htCapabilities{}, fmt.Errorf("set link down: %w", err)
 	}
 
 	if err := setInterfaceType(conn, family.ID, iface.Index, NL80211_IFTYPE_AP); err != nil {
-		return nil, err
+		return nil, htCapabilities{}, err
 	}
 
 	if err := linkup.LinkSetUp(link); err != nil {
-		return nil, fmt.Errorf("set link up: %w", err)
+		return nil, htCapabilities{}, fmt.Errorf("set link up: %w", err)
 	}
 
 	// Give the interface an address in the DHCP pool's subnet. Without this,
@@ -215,28 +215,34 @@ func HostAPD(name string) (*net.Interface, error) {
 		},
 	}
 	if err := linkup.AddrAdd(link, apAddr); err != nil {
-		return nil, fmt.Errorf("assign %s to %q: %w", dhcpServerIP, name, err)
+		return nil, htCapabilities{}, fmt.Errorf("assign %s to %q: %w", dhcpServerIP, name, err)
 	}
 
 	// verify
 	if err := queryInterface(conn, family.ID, iface.Index); err != nil {
-		return nil, err
+		return nil, htCapabilities{}, err
 	}
 
 	htCaps, err := queryWiphyHTCapabilities(conn, family.ID, wiphyIndex)
 	if err != nil {
-		return nil, fmt.Errorf("query HT capabilities: %w", err)
+		return nil, htCapabilities{}, fmt.Errorf("query HT capabilities: %w", err)
 	}
 	fmt.Println("HT capabilities:", htCaps)
 
-	beaconHead := buildBeaconHead(iface.HardwareAddr, "shmitm", apChannel)
+	beaconHead := buildBeaconHead(iface.HardwareAddr, "shmitm", apChannel, htCaps)
 	beaconTail := []byte{}
-	probeResp := buildBeaconResponse(iface.HardwareAddr, "shmitm", apChannel)
+	probeResp := buildBeaconResponse(iface.HardwareAddr, "shmitm", apChannel, htCaps)
+
+	channelType := uint32(NL80211_CHAN_NO_HT)
+	if htCaps.found {
+		channelType = NL80211_CHAN_HT20
+	}
 
 	b, _ := netlink.MarshalAttributes([]netlink.Attribute{
 		{Type: NL80211_ATTR_IFINDEX, Data: nlenc.Uint32Bytes(uint32(iface.Index))},
 		{Type: NL80211_ATTR_SSID, Data: []byte("shmitm")},
 		{Type: NL80211_ATTR_WIPHY_FREQ, Data: nlenc.Uint32Bytes(apFreqMHz)},
+		{Type: NL80211_ATTR_WIPHY_CHANNEL_TYPE, Data: nlenc.Uint32Bytes(channelType)},
 		{Type: NL80211_ATTR_BEACON_INTERVAL, Data: nlenc.Uint32Bytes(100)},
 		{Type: NL80211_ATTR_DTIM_PERIOD, Data: nlenc.Uint32Bytes(2)},
 		{Type: NL80211_ATTR_BEACON_HEAD, Data: beaconHead},
@@ -264,10 +270,10 @@ func HostAPD(name string) (*net.Interface, error) {
 
 	fmt.Println("AP started")
 
-	return iface, nil
+	return iface, htCaps, nil
 }
 
-func buildBeaconHead(mac net.HardwareAddr, ssid string, channel uint8) []byte {
+func buildBeaconHead(mac net.HardwareAddr, ssid string, channel uint8, htCaps htCapabilities) []byte {
 	b := []byte{}
 
 	// MAC header
@@ -296,10 +302,15 @@ func buildBeaconHead(mac net.HardwareAddr, ssid string, channel uint8) []byte {
 	// DS parameter set IE (channel)
 	b = append(b, 0x03, 0x01, channel)
 
+	if htCaps.found {
+		b = append(b, buildHTCapabilitiesIE(htCaps)...)
+		b = append(b, buildHTOperationIE(channel)...)
+	}
+
 	return b
 }
 
-func buildBeaconResponse(mac net.HardwareAddr, ssid string, channel uint8) []byte {
+func buildBeaconResponse(mac net.HardwareAddr, ssid string, channel uint8, htCaps htCapabilities) []byte {
 	b := []byte{}
 
 	// MAC header
@@ -327,6 +338,11 @@ func buildBeaconResponse(mac net.HardwareAddr, ssid string, channel uint8) []byt
 
 	// DS parameter set IE (channel)
 	b = append(b, 0x03, 0x01, channel)
+
+	if htCaps.found {
+		b = append(b, buildHTCapabilitiesIE(htCaps)...)
+		b = append(b, buildHTOperationIE(channel)...)
+	}
 
 	return b
 }

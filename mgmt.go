@@ -172,11 +172,15 @@ type mgmtResponder struct {
 	familyID uint16
 	ifindex  int
 	apMAC    net.HardwareAddr
+	htCaps   htCapabilities
 }
 
 // newMgmtResponder dials a fresh genetlink connection for transmitting
-// frames and station commands back to clients on ifindex.
-func newMgmtResponder(ifindex int, apMAC net.HardwareAddr) (*mgmtResponder, error) {
+// frames and station commands back to clients on ifindex. htCaps is the
+// wiphy's real HT capability (from HostAPD's startup query), used to mirror
+// HT Capabilities/Operation IEs in association responses so a session
+// doesn't silently fall back to legacy rates.
+func newMgmtResponder(ifindex int, apMAC net.HardwareAddr, htCaps htCapabilities) (*mgmtResponder, error) {
 	conn, err := genetlink.Dial(nil)
 	if err != nil {
 		return nil, fmt.Errorf("dial genetlink: %w", err)
@@ -188,7 +192,7 @@ func newMgmtResponder(ifindex int, apMAC net.HardwareAddr) (*mgmtResponder, erro
 		return nil, fmt.Errorf("get nl80211 family: %w", err)
 	}
 
-	return &mgmtResponder{conn: conn, familyID: family.ID, ifindex: ifindex, apMAC: apMAC}, nil
+	return &mgmtResponder{conn: conn, familyID: family.ID, ifindex: ifindex, apMAC: apMAC, htCaps: htCaps}, nil
 }
 
 func (r *mgmtResponder) Close() error {
@@ -242,13 +246,14 @@ func (r *mgmtResponder) handleAuth(client net.HardwareAddr) {
 // station"). Sending the response first leaves exactly that race.
 func (r *mgmtResponder) handleAssocReq(client net.HardwareAddr, frame []byte) {
 	listenInterval := assocRequestListenInterval(frame)
-	if err := r.newStation(client, staAID, listenInterval); err != nil {
+	clientHTCap, hasHTCap := assocRequestHTCapability(frame)
+	if err := r.newStation(client, staAID, listenInterval, clientHTCap, hasHTCap); err != nil {
 		fmt.Printf("mgmt: failed to add station %s: %v\n", client, err)
 		return
 	}
 	fmt.Printf("mgmt: added station %s (aid=%d)\n", client, staAID)
 
-	resp := buildAssocResponse(r.apMAC, client, staAID)
+	resp := buildAssocResponse(r.apMAC, client, staAID, r.htCaps)
 	if err := r.sendFrame(resp); err != nil {
 		fmt.Printf("mgmt: failed to send assoc response to %s: %v\n", client, err)
 		return
@@ -258,21 +263,29 @@ func (r *mgmtResponder) handleAssocReq(client net.HardwareAddr, frame []byte) {
 
 // newStation registers client with the driver as authenticated, associated,
 // and (since this is an open network) authorized, so it starts accepting
-// and forwarding the station's data frames.
-func (r *mgmtResponder) newStation(client net.HardwareAddr, aid, listenInterval uint16) error {
+// and forwarding the station's data frames. When the client advertised its
+// own HT Capabilities in the association request, that's passed through too
+// (NL80211_ATTR_HT_CAPABILITY) so the driver's rate control knows it can use
+// HT/MCS rates to this specific station instead of defaulting to legacy.
+func (r *mgmtResponder) newStation(client net.HardwareAddr, aid, listenInterval uint16, htCap []byte, hasHTCap bool) error {
 	mask := uint32(nl80211StaFlagAuthenticated | nl80211StaFlagAssociated | nl80211StaFlagAuthorized)
 	staFlags := make([]byte, 8)
 	nlenc.PutUint32(staFlags[0:4], mask) // mask: which flags this update touches
 	nlenc.PutUint32(staFlags[4:8], mask) // set: turn all of them on
 
-	b, err := netlink.MarshalAttributes([]netlink.Attribute{
+	attrs := []netlink.Attribute{
 		{Type: NL80211_ATTR_IFINDEX, Data: nlenc.Uint32Bytes(uint32(r.ifindex))},
 		{Type: NL80211_ATTR_MAC, Data: client},
 		{Type: NL80211_ATTR_STA_AID, Data: nlenc.Uint16Bytes(aid)},
 		{Type: NL80211_ATTR_STA_LISTEN_INTERVAL, Data: nlenc.Uint16Bytes(listenInterval)},
 		{Type: NL80211_ATTR_STA_SUPPORTED_RATES, Data: apSupportedRates},
 		{Type: NL80211_ATTR_STA_FLAGS2, Data: staFlags},
-	})
+	}
+	if hasHTCap {
+		attrs = append(attrs, netlink.Attribute{Type: NL80211_ATTR_HT_CAPABILITY, Data: htCap})
+	}
+
+	b, err := netlink.MarshalAttributes(attrs)
 	if err != nil {
 		return fmt.Errorf("marshal NEW_STATION attributes: %w", err)
 	}
@@ -326,9 +339,13 @@ func assocRequestListenInterval(frame []byte) uint16 {
 }
 
 // buildAssocResponse builds a successful association response addressed
-// from apMAC to client, echoing the same capability info and supported
-// rates advertised in our beacons.
-func buildAssocResponse(apMAC, client net.HardwareAddr, aid uint16) []byte {
+// from apMAC to client, echoing the same capability info, supported rates,
+// and (when present) HT Capabilities/Operation advertised in our beacons.
+// Including HT here matters: the association response is the definitive
+// per-session capability confirmation, and a client that doesn't see HT
+// confirmed here can fall back to legacy rates for the whole session even
+// if the beacon separately advertised HT support.
+func buildAssocResponse(apMAC, client net.HardwareAddr, aid uint16, htCaps htCapabilities) []byte {
 	b := []byte{}
 
 	// MAC header
@@ -351,7 +368,31 @@ func buildAssocResponse(apMAC, client net.HardwareAddr, aid uint16) []byte {
 	b = append(b, 0x01, byte(len(apSupportedRates)))
 	b = append(b, apSupportedRates...)
 
+	if htCaps.found {
+		b = append(b, buildHTCapabilitiesIE(htCaps)...)
+		b = append(b, buildHTOperationIE(apChannel)...)
+	}
+
 	return b
+}
+
+// assocRequestHTCapability extracts the body of the client's own HT
+// Capabilities element (ID 45, 26-byte body) from its association request,
+// if present. IEs start at offset 28 (24-byte MAC header + 2-byte
+// Capability Info + 2-byte Listen Interval fixed fields).
+func assocRequestHTCapability(frame []byte) ([]byte, bool) {
+	for i := 28; i+2 <= len(frame); {
+		id, length := frame[i], int(frame[i+1])
+		i += 2
+		if i+length > len(frame) {
+			return nil, false
+		}
+		if id == 0x2d && length == 26 {
+			return append([]byte(nil), frame[i:i+length]...), true
+		}
+		i += length
+	}
+	return nil, false
 }
 
 // listenMgmtFrames blocks, dispatching every management frame the kernel

@@ -19,7 +19,7 @@ const (
 )
 
 func runMitm() error {
-	iface, err := HostAPD(apIfaceName)
+	iface, htCaps, err := HostAPD(apIfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to resolve nl80211 family: %w", err)
 	}
@@ -36,7 +36,7 @@ func runMitm() error {
 	}
 	defer mgmtConn.Close()
 
-	mgmtResp, err := newMgmtResponder(iface.Index, iface.HardwareAddr)
+	mgmtResp, err := newMgmtResponder(iface.Index, iface.HardwareAddr, htCaps)
 	if err != nil {
 		return fmt.Errorf("failed to set up management-frame responder: %w", err)
 	}
