@@ -36,6 +36,16 @@ func runMitm() error {
 	}
 	fmt.Println("Forwarding and NATing to", wanIfaceName)
 
+	if !externalProxy {
+		proxyLn, err := openProxyListener()
+		if err != nil {
+			return fmt.Errorf("failed to set up mitm proxy listener: %w", err)
+		}
+		defer proxyLn.Close()
+		go serveProxy(proxyLn)
+		fmt.Println("Proxying HTTP/HTTPS traffic on port", mitmProxyPort)
+	}
+
 	mgmtConn, err := openMgmtListener(iface.Index)
 	if err != nil {
 		return fmt.Errorf("failed to set up management-frame listener: %w", err)
