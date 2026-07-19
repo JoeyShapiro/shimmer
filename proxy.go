@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -44,7 +46,10 @@ func serveProxy(ln net.Listener) {
 }
 
 // handleProxyConn recovers where conn was really headed and relays bytes
-// bidirectionally between the client and that real destination.
+// bidirectionally between the client and that real destination. For plain
+// HTTP (port 80) it first parses and logs the request's full URL, then
+// forwards that same request on unmodified — HTTPS (port 443) is opaque
+// TLS at this point and just gets relayed as raw bytes.
 func handleProxyConn(conn net.Conn) {
 	defer conn.Close()
 
@@ -53,7 +58,6 @@ func handleProxyConn(conn net.Conn) {
 		fmt.Printf("proxy: failed to get original destination for %s: %v\n", conn.RemoteAddr(), err)
 		return
 	}
-	fmt.Printf("proxy: %s -> %s\n", conn.RemoteAddr(), dst)
 
 	upstream, err := net.Dial("tcp", dst.String())
 	if err != nil {
@@ -62,9 +66,26 @@ func handleProxyConn(conn net.Conn) {
 	}
 	defer upstream.Close()
 
+	clientReader := bufio.NewReader(conn)
+
+	if dst.Port == 80 {
+		req, err := http.ReadRequest(clientReader)
+		if err != nil {
+			fmt.Printf("proxy: failed to parse HTTP request from %s: %v\n", conn.RemoteAddr(), err)
+			return
+		}
+		fmt.Printf("proxy: %s http://%s%s\n", conn.RemoteAddr(), req.Host, req.URL.RequestURI())
+		if err := req.Write(upstream); err != nil {
+			fmt.Printf("proxy: failed to forward request to %s: %v\n", dst, err)
+			return
+		}
+	} else {
+		fmt.Printf("proxy: %s -> %s\n", conn.RemoteAddr(), dst)
+	}
+
 	done := make(chan struct{}, 2)
 	go func() {
-		io.Copy(upstream, conn)
+		io.Copy(upstream, clientReader)
 		done <- struct{}{}
 	}()
 	go func() {
