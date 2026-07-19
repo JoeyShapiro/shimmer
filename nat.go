@@ -8,6 +8,7 @@ import (
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
+	"golang.org/x/sys/unix"
 )
 
 // enableIPForwarding turns on kernel IPv4 forwarding. Without it the kernel
@@ -45,6 +46,10 @@ func chainPolicyRef(p nftables.ChainPolicy) *nftables.ChainPolicy {
 //	chain postrouting {
 //	    type nat hook postrouting priority srcnat;
 //	    oifname $WAN masquerade
+//	}
+//	chain prerouting {
+//	    type nat hook prerouting priority dstnat;
+//	    iifname $LAN tcp dport { 80, 443 } redirect to :mitmProxyPort
 //	}
 func setupNAT(lanIface, wanIface string) error {
 	if err := enableIPForwarding(); err != nil {
@@ -133,11 +138,43 @@ func setupNAT(lanIface, wanIface string) error {
 		},
 	})
 
+	prerouting := conn.AddChain(&nftables.Chain{
+		Name:     "prerouting",
+		Table:    table,
+		Type:     nftables.ChainTypeNAT,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityNATDest,
+	})
+
+	// iifname lanIface tcp dport {80, 443} redirect to :mitmProxyPort. This
+	// transparently rewrites the destination of client-initiated web traffic
+	// to a local port, regardless of what the client actually addressed —
+	// the client never sees this happen. Whatever's listening on
+	// mitmProxyPort becomes a real TCP endpoint for that traffic and has to
+	// recover the original destination itself via getsockopt(SO_ORIGINAL_DST).
+	for _, port := range []uint16{80, 443} {
+		conn.AddRule(&nftables.Rule{
+			Table: table,
+			Chain: prerouting,
+			Exprs: []expr.Any{
+				&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifnameAttr(lanIface)},
+				&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+				&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+				&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(port)},
+				&expr.Immediate{Register: 1, Data: binaryutil.BigEndian.PutUint16(mitmProxyPort)},
+				&expr.Counter{},
+				&expr.Redir{RegisterProtoMin: 1},
+			},
+		})
+	}
+
 	if err := conn.Flush(); err != nil {
 		return fmt.Errorf("apply nftables ruleset: %w", err)
 	}
 
-	go watchNATCounters(table, forward, postrouting)
+	go watchNATCounters(table, forward, postrouting, prerouting)
 
 	return nil
 }

@@ -16,6 +16,12 @@ const (
 
 	apIfaceName  = "wlp0s20f0u13"
 	wanIfaceName = "eno1" // the interface with actual internet access
+
+	// mitmProxyPort is where HTTP/HTTPS traffic from clients gets
+	// transparently redirected. Nothing has to be listening here yet, and
+	// whatever does doesn't have to be us — a real mitmproxy instance
+	// pointed at this port works too.
+	mitmProxyPort = 8081
 )
 
 func runMitm() error {
