@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,15 @@ const externalProxy = false
 // recovering a redirected connection's pre-NAT destination.
 const soOriginalDst = 80
 
+// proxyServer terminates redirected connections. HTTP requests get parsed
+// and logged before being forwarded; HTTPS connections get a real TLS
+// handshake — using ca to mint a leaf certificate matching whatever
+// hostname the client requests via SNI — so the decrypted HTTP traffic can
+// be read the same way HTTP already is.
+type proxyServer struct {
+	ca *certAuthority
+}
+
 // openProxyListener listens on mitmProxyPort for the TCP connections
 // setupNAT's prerouting rule redirects there.
 func openProxyListener() (net.Listener, error) {
@@ -30,32 +40,35 @@ func openProxyListener() (net.Listener, error) {
 	return ln, nil
 }
 
-// serveProxy accepts redirected connections and, for now, just forwards
-// each one on to its original destination unmodified — proving the
-// redirect+accept+relay pipeline end to end before any actual interception
-// logic gets added on top.
-func serveProxy(ln net.Listener) {
+// serve accepts redirected connections and dispatches each to its own
+// handler goroutine.
+func (p *proxyServer) serve(ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			fmt.Printf("proxy: accept error: %v\n", err)
 			return
 		}
-		go handleProxyConn(conn)
+		go p.handleConn(conn)
 	}
 }
 
-// handleProxyConn recovers where conn was really headed and relays bytes
-// bidirectionally between the client and that real destination. For plain
-// HTTP (port 80) it first parses and logs the request's full URL, then
-// forwards that same request on unmodified — HTTPS (port 443) is opaque
-// TLS at this point and just gets relayed as raw bytes.
-func handleProxyConn(conn net.Conn) {
+// handleConn recovers where conn was really headed and either terminates it
+// as HTTPS (see handleHTTPS) or, for plain HTTP, parses and logs the
+// request's full URL before forwarding it on unmodified. Anything else
+// (shouldn't happen given setupNAT only redirects ports 80/443 here) just
+// gets relayed as raw bytes.
+func (p *proxyServer) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	dst, err := originalDst(conn)
 	if err != nil {
 		fmt.Printf("proxy: failed to get original destination for %s: %v\n", conn.RemoteAddr(), err)
+		return
+	}
+
+	if dst.Port == 443 {
+		p.handleHTTPS(conn, dst)
 		return
 	}
 
@@ -83,13 +96,74 @@ func handleProxyConn(conn net.Conn) {
 		fmt.Printf("proxy: %s -> %s\n", conn.RemoteAddr(), dst)
 	}
 
+	relay(conn, clientReader, upstream)
+}
+
+// handleHTTPS terminates the client's TLS connection using a leaf
+// certificate minted for whatever hostname it requests via SNI, then opens
+// a second, separate TLS connection of our own to the real destination —
+// splitting what the client believes is one encrypted conversation into
+// two, with the decrypted HTTP sitting in our process in between.
+func (p *proxyServer) handleHTTPS(conn net.Conn, dst *net.TCPAddr) {
+	tlsConfig := &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return p.ca.certFor(hello.ServerName)
+		},
+		// No HTTP/2: it's binary-framed and multiplexed, not worth the
+		// parsing complexity yet. This forces the client to fall back to
+		// HTTP/1.1 with us even if it would've preferred h2 with the real
+		// site.
+		NextProtos: []string{"http/1.1"},
+	}
+
+	clientConn := tls.Server(conn, tlsConfig)
+	if err := clientConn.Handshake(); err != nil {
+		fmt.Printf("proxy: TLS handshake with %s failed: %v\n", conn.RemoteAddr(), err)
+		return
+	}
+
+	serverName := clientConn.ConnectionState().ServerName
+	if serverName == "" {
+		// No SNI. Rare for a modern client, but fall back to the raw IP we
+		// recovered from SO_ORIGINAL_DST so we can still dial upstream.
+		serverName = dst.IP.String()
+	}
+
+	upstream, err := tls.Dial("tcp", dst.String(), &tls.Config{ServerName: serverName})
+	if err != nil {
+		fmt.Printf("proxy: failed to dial %s (%s): %v\n", dst, serverName, err)
+		return
+	}
+	defer upstream.Close()
+
+	clientReader := bufio.NewReader(clientConn)
+
+	req, err := http.ReadRequest(clientReader)
+	if err != nil {
+		fmt.Printf("proxy: failed to parse HTTPS request from %s: %v\n", conn.RemoteAddr(), err)
+		return
+	}
+	fmt.Printf("proxy: %s https://%s%s\n", conn.RemoteAddr(), req.Host, req.URL.RequestURI())
+	if err := req.Write(upstream); err != nil {
+		fmt.Printf("proxy: failed to forward request to %s: %v\n", dst, err)
+		return
+	}
+
+	relay(clientConn, clientReader, upstream)
+}
+
+// relay copies bytes bidirectionally between a client (writes go to
+// clientWriter, reads come from clientReader — which may already have
+// buffered/consumed an initial request) and upstream, until either side
+// closes.
+func relay(clientWriter io.Writer, clientReader io.Reader, upstream io.ReadWriter) {
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(upstream, clientReader)
 		done <- struct{}{}
 	}()
 	go func() {
-		io.Copy(conn, upstream)
+		io.Copy(clientWriter, upstream)
 		done <- struct{}{}
 	}()
 	<-done

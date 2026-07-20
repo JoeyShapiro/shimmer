@@ -48,14 +48,14 @@ func runMitm() error {
 		if err != nil {
 			return fmt.Errorf("failed to set up MITM CA: %w", err)
 		}
-		_ = ca // not used for interception yet — HTTPS is still relayed raw
 
 		proxyLn, err := openProxyListener()
 		if err != nil {
 			return fmt.Errorf("failed to set up mitm proxy listener: %w", err)
 		}
 		defer proxyLn.Close()
-		go serveProxy(proxyLn)
+		ps := &proxyServer{ca: ca}
+		go ps.serve(proxyLn)
 		fmt.Println("Proxying HTTP/HTTPS traffic on port", mitmProxyPort)
 	}
 
