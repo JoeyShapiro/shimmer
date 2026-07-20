@@ -44,6 +44,12 @@ func runMitm() error {
 	fmt.Println("Forwarding and NATing to", wanIfaceName)
 
 	if !externalProxy {
+		ca, err := loadOrCreateCA()
+		if err != nil {
+			return fmt.Errorf("failed to set up MITM CA: %w", err)
+		}
+		_ = ca // not used for interception yet — HTTPS is still relayed raw
+
 		proxyLn, err := openProxyListener()
 		if err != nil {
 			return fmt.Errorf("failed to set up mitm proxy listener: %w", err)
