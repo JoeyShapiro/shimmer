@@ -109,11 +109,15 @@ func (p *proxyServer) handleHTTPS(conn net.Conn, dst *net.TCPAddr) {
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return p.ca.certFor(hello.ServerName)
 		},
-		// No HTTP/2: it's binary-framed and multiplexed, not worth the
-		// parsing complexity yet. This forces the client to fall back to
-		// HTTP/1.1 with us even if it would've preferred h2 with the real
-		// site.
-		NextProtos: []string{"http/1.1"},
+		// Deliberately no NextProtos: Go's crypto/tls treats a non-empty
+		// NextProtos as a hard requirement and aborts the handshake outright
+		// if the client's offered ALPN list doesn't intersect with it —
+		// which real clients that only offer "h2" (no http/1.1 fallback,
+		// e.g. Android's own connectivity-check probe) hit immediately.
+		// Leaving it unset just omits the ALPN response instead; the
+		// handshake succeeds either way, and we still can't parse real
+		// HTTP/2 framing, but that becomes a contained per-request parse
+		// failure in http.ReadRequest rather than a rejected connection.
 	}
 
 	clientConn := tls.Server(conn, tlsConfig)
