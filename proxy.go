@@ -79,24 +79,13 @@ func (p *proxyServer) handleConn(conn net.Conn) {
 	}
 	defer upstream.Close()
 
-	clientReader := bufio.NewReader(conn)
-
 	if dst.Port == 80 {
-		req, err := http.ReadRequest(clientReader)
-		if err != nil {
-			fmt.Printf("proxy: failed to parse HTTP request from %s: %v\n", conn.RemoteAddr(), err)
-			return
-		}
-		fmt.Printf("proxy: %s http://%s%s\n", conn.RemoteAddr(), req.Host, req.URL.RequestURI())
-		if err := req.Write(upstream); err != nil {
-			fmt.Printf("proxy: failed to forward request to %s: %v\n", dst, err)
-			return
-		}
-	} else {
-		fmt.Printf("proxy: %s -> %s\n", conn.RemoteAddr(), dst)
+		proxyHTTP("http://", conn, bufio.NewReader(conn), upstream)
+		return
 	}
 
-	relay(conn, clientReader, upstream)
+	fmt.Printf("proxy: %s -> %s\n", conn.RemoteAddr(), dst)
+	relay(conn, conn, upstream)
 }
 
 // handleHTTPS terminates the client's TLS connection using a leaf
@@ -140,20 +129,51 @@ func (p *proxyServer) handleHTTPS(conn net.Conn, dst *net.TCPAddr) {
 	}
 	defer upstream.Close()
 
-	clientReader := bufio.NewReader(clientConn)
+	proxyHTTP("https://", clientConn, bufio.NewReader(clientConn), upstream)
+}
 
-	req, err := http.ReadRequest(clientReader)
-	if err != nil {
-		fmt.Printf("proxy: failed to parse HTTPS request from %s: %v\n", conn.RemoteAddr(), err)
-		return
-	}
-	fmt.Printf("proxy: %s https://%s%s\n", conn.RemoteAddr(), req.Host, req.URL.RequestURI())
-	if err := req.Write(upstream); err != nil {
-		fmt.Printf("proxy: failed to forward request to %s: %v\n", dst, err)
-		return
-	}
+// proxyHTTP repeatedly reads a request from the client, logs it, forwards
+// it upstream, reads the matching response, logs it, and relays it back —
+// looping for as many requests as the connection's keep-alive semantics
+// allow (req.Close / resp.Close, set from each message's own Connection
+// header). scheme is purely cosmetic, for the logged URL ("http://" or
+// "https://").
+func proxyHTTP(scheme string, clientConn net.Conn, clientReader *bufio.Reader, upstream io.ReadWriter) {
+	upstreamReader := bufio.NewReader(upstream)
 
-	relay(clientConn, clientReader, upstream)
+	for {
+		req, err := http.ReadRequest(clientReader)
+		if err != nil {
+			if err != io.EOF {
+				fmt.Printf("proxy: failed to parse %srequest from %s: %v\n", scheme, clientConn.RemoteAddr(), err)
+			}
+			return
+		}
+		fmt.Printf("proxy: %s %s%s%s\n", clientConn.RemoteAddr(), scheme, req.Host, req.URL.RequestURI())
+
+		if err := req.Write(upstream); err != nil {
+			fmt.Printf("proxy: failed to forward request to upstream: %v\n", err)
+			return
+		}
+
+		resp, err := http.ReadResponse(upstreamReader, req)
+		if err != nil {
+			fmt.Printf("proxy: failed to parse response for %s%s%s: %v\n", scheme, req.Host, req.URL.RequestURI(), err)
+			return
+		}
+		fmt.Printf("proxy: %s <- %d %s%s%s\n", clientConn.RemoteAddr(), resp.StatusCode, scheme, req.Host, req.URL.RequestURI())
+
+		writeErr := resp.Write(clientConn)
+		resp.Body.Close()
+		if writeErr != nil {
+			fmt.Printf("proxy: failed to forward response to %s: %v\n", clientConn.RemoteAddr(), writeErr)
+			return
+		}
+
+		if req.Close || resp.Close {
+			return
+		}
+	}
 }
 
 // relay copies bytes bidirectionally between a client (writes go to
